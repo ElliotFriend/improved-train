@@ -88,7 +88,6 @@
                             keypair,
                             mode: mppMode,
                             onProgress(event) {
-                                console.log('onprogress event', event);
                                 switch (event.type) {
                                     case 'challenge':
                                         events.push({

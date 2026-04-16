@@ -19,9 +19,7 @@ export const POST: RequestHandler = async ({ request, url }) => {
     if (step === 'friendbot') {
         try {
             // we have to create the account with friendbot
-            console.log('we are trying friendbot');
             const response = await server.fundAddress(publicKey);
-            console.log('friendbot response', response);
 
             // return that it was successful, including the tx hash
             return json({

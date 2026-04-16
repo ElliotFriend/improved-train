@@ -80,6 +80,9 @@ export const POST: RequestHandler = async ({ request, url }) => {
         error(400, { message: `messages must be an array of 1-${MAX_MESSAGES} items` });
     }
 
+    // debugging
+    console.log('latest message', messages[messages.length - 1]);
+
     const stream = client.messages.stream({
         model: 'claude-haiku-4-5',
         max_tokens: 4096,
