@@ -20,9 +20,28 @@ import {
     A2A_NETWORK,
 } from '$env/static/private';
 
-import withdrawalInput from './assets/withdrawal_input.json';
 import wasmUrl from './assets/main.wasm?url';
 import zkeyUrl from './assets/main_final.zkey?url';
+import nullifierHashesJson from './assets/nullifier_hashes.json';
+
+// Bundle every per-coin withdrawal input under assets/withdrawals/*.json. Vite
+// picks them up at build time (eager: true) so the server has them in memory.
+const withdrawalModules = import.meta.glob<{ default: unknown }>(
+    './assets/withdrawals/*.json',
+    { eager: true },
+);
+const withdrawals: { index: number; input: Record<string, unknown>; nullifierHash: string }[] =
+    Object.entries(withdrawalModules)
+        .map(([path, mod]) => {
+            const m = path.match(/(\d+)\.json$/);
+            const index = m ? parseInt(m[1], 10) : 0;
+            return {
+                index,
+                input: mod.default as Record<string, unknown>,
+                nullifierHash: (nullifierHashesJson as string[])[index],
+            };
+        })
+        .sort((a, b) => a.index - b.index);
 
 export const config = {
     nursePublic: A2A_NURSE_PUBLIC,
@@ -129,11 +148,56 @@ export interface WithdrawProgress {
     step: (label: string, detail?: string) => void;
 }
 
+// ---------- On-chain nullifier check ----------
+
+/** Returns the set of nullifier_hashes already spent on the pool, as decimal
+ *  strings (matching the format in `nullifier_hashes.json`). */
+async function loadUsedNullifiers(): Promise<Set<string>> {
+    const contract = new Contract(config.privacyPoolId);
+    const account = await sorobanRpc.getAccount(config.nursePublic);
+    const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASE,
+    })
+        .addOperation(contract.call('get_nullifiers'))
+        .setTimeout(60)
+        .build();
+    const sim = await sorobanRpc.simulateTransaction(tx);
+    if (!('result' in sim) || !sim.result) return new Set();
+    const used = scValToNative(sim.result.retval) as Uint8Array[] | undefined;
+    if (!used) return new Set();
+    return new Set(used.map((b) => BigInt('0x' + Buffer.from(b).toString('hex')).toString()));
+}
+
+function pickWithdrawal(used: Set<string>) {
+    for (const w of withdrawals) {
+        if (!used.has(w.nullifierHash)) return w;
+    }
+    return null;
+}
+
 // ---------- Real privacy-pool withdrawal ----------
 
 export async function submitPrivacyPoolWithdraw(
     progress: WithdrawProgress,
 ): Promise<{ hash: string; ledger: number }> {
+    progress.step(
+        'Reading on-chain nullifier set',
+        `pool ${config.privacyPoolId.slice(0, 8)}... (get_nullifiers)`,
+    );
+    const used = await loadUsedNullifiers();
+    const choice = pickWithdrawal(used);
+    if (!choice) {
+        throw new Error(
+            `All ${withdrawals.length} bundled coins have been spent. ` +
+                'Re-run scripts/a2a-setup.sh to deploy a fresh pool with new coins.',
+        );
+    }
+    progress.step(
+        `Selected coin ${choice.index + 1} of ${withdrawals.length}`,
+        `${used.size} of ${withdrawals.length} spent so far`,
+    );
+
     progress.step('Loading circuit assets', 'main.wasm + main_final.zkey');
     const { wasm, zkey } = await loadCircuits();
 
@@ -142,7 +206,7 @@ export async function submitPrivacyPoolWithdraw(
         'snarkjs in-process (witness + prove)',
     );
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-        withdrawalInput as unknown as snarkjs.CircuitSignals,
+        choice.input as unknown as snarkjs.CircuitSignals,
         wasm,
         zkey,
     );

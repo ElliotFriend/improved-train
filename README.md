@@ -48,15 +48,10 @@ See `../soroban-examples/privacy-pools/README.md` for the recipe. Then:
 pnpm install
 cp .env.example .env   # fill in A2A_* + ANTHROPIC_API_KEY
 
-# Deploy a fresh pool, deposit a coin, pin association root (writes .a2a/)
+# Deploy a fresh pool, deposit COIN_COUNT (default 4) coins, pin association
+# root, pre-compute proofs/nullifier hashes, bundle everything into
+# src/lib/a2a/assets/.
 scripts/a2a-setup.sh
-
-# Copy bundled assets so the function can read them at request time
-cp ../soroban-examples/privacy-pools/circuits/build/main_js/main.wasm src/lib/a2a/assets/
-cp ../soroban-examples/privacy-pools/circuits/output/main_final.zkey src/lib/a2a/assets/
-../soroban-examples/privacy-pools/target/release/stellar-coinutils withdraw \
-    .a2a/coin.json .a2a/state.json .a2a/association.json \
-    -o src/lib/a2a/assets/withdrawal_input.json
 
 # Point .env at the new pool
 grep '^PRIVACY_POOL_ID' .a2a/contracts.env
@@ -82,11 +77,15 @@ Required Vercel env vars:
 - `A2A_NETWORK=testnet`
 - `ANTHROPIC_API_KEY` (optional; placeholder advice if unset)
 
-### One-shot per deploy
+### Multi-coin per deploy
 
-Each pool is single-use today because `lean-imt::insert` exceeds Soroban's budget on
-the second deposit (CAP-75 pending). So each Vercel deploy is good for one
-consultation — repeat the local-dev setup + rebundle + redeploy to refresh.
+CAP-75 (Poseidon as a host function) shipped in Soroban protocol 26, so a single
+pool can now hold multiple coins — up to 4, capped by the association tree's
+depth-2 limit. `scripts/a2a-setup.sh` deposits `COIN_COUNT` (default 4) coins per
+pool and bundles a withdrawal input + nullifier hash per coin. The server reads
+the on-chain `get_nullifiers` set each request and spends the first unused coin.
+
+When all four are spent the function returns a clear "re-run setup" error.
 
 ## Tech
 

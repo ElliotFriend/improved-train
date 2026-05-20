@@ -32,18 +32,22 @@ can't be forced onto an unwilling recipient.
 src/lib/a2a/assets/
   main.wasm                  circom-compiled withdrawal circuit (~1.2 MB)
   main_final.zkey            Groth16 zkey (~12 MB)
-  withdrawal_input.json      precomputed coin + state + association inputs
+  withdrawals/{0..N-1}.json  per-coin withdrawal inputs
+  nullifier_hashes.json      decimal nullifier_hash[i] for each coin
 ```
 
-These are produced by `scripts/a2a-setup.sh` (which deploys a fresh pool, deposits a
-coin, pins the association root, and writes the artifacts to `.a2a/`) plus a manual
-copy into `src/lib/a2a/assets/` of `withdrawal_input.json`, `main.wasm` and
-`main_final.zkey`. The `A2A_PRIVACY_POOL_ID` env var pairs the bundle with the
-deployed pool.
+These are produced by `scripts/a2a-setup.sh`, which deploys a fresh pool, deposits
+`COIN_COUNT` (default 4) coins, pins the association root with all labels, and
+emits one `withdrawal_input` + one `nullifier_hash` per coin. The
+`A2A_PRIVACY_POOL_ID` env var pairs the bundle with the deployed pool.
 
-Each pool is single-use today (CAP-75 / Soroban budget on the second deposit), so
-each Vercel deploy is good for one consultation. Re-run setup + re-bundle + re-deploy
-to refresh.
+Per request, the server reads the on-chain `get_nullifiers` set and spends the
+first bundled coin whose `nullifier_hash` isn't in it. Once all coins are spent
+the endpoint returns a clear "re-run setup" error.
+
+The 4-coin cap comes from the on-chain association tree's depth-2 layout
+(max 4 labels). The multi-deposit was previously budget-blocked but landed once
+CAP-75 added Poseidon as a Soroban host function in protocol 26.
 
 ## Files
 
