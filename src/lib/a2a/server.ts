@@ -2,7 +2,6 @@ import {
     Address,
     BASE_FEE,
     Contract,
-    Horizon,
     Keypair,
     Networks,
     TransactionBuilder,
@@ -61,12 +60,6 @@ export const config = {
 
 const NETWORK_PASSPHRASE =
     config.network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
-
-const horizon = new Horizon.Server(
-    config.network === 'testnet'
-        ? 'https://horizon-testnet.stellar.org'
-        : 'https://horizon.stellar.org',
-);
 
 const sorobanRpc = new rpc.Server(
     config.network === 'testnet'
@@ -282,19 +275,37 @@ export async function submitPrivacyPoolWithdraw(
 // ---------- Settlement verification ----------
 
 /**
- * Confirms a settlement tx on Horizon: must be successful and signed by the
- * nurse account (since nurse-as-source is what to.require_auth() pins).
+ * Confirms a settlement tx via Soroban RPC: must be successful and signed by
+ * the nurse account (since nurse-as-source is what to.require_auth() pins).
+ *
+ * RPC indexing lags submission by a few hundred ms, so retry NOT_FOUND briefly.
  */
 export async function verifyPayment(
     hash: string,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
     try {
-        const tx = await horizon.transactions().transaction(hash).call();
-        if (!tx.successful) return { ok: false, reason: 'tx not successful' };
-        if (tx.source_account !== config.nursePublic) {
+        const deadline = Date.now() + 10_000;
+        let result = await sorobanRpc.getTransaction(hash);
+        while (result.status === rpc.Api.GetTransactionStatus.NOT_FOUND && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 750));
+            result = await sorobanRpc.getTransaction(hash);
+        }
+
+        if (result.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
+            return { ok: false, reason: 'tx not found on RPC within 10s' };
+        }
+        if (result.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+            return { ok: false, reason: `tx status: ${result.status}` };
+        }
+
+        // Decode the envelope to read the source account.
+        const tx = TransactionBuilder.fromXDR(result.envelopeXdr, NETWORK_PASSPHRASE);
+        // fromXDR may return a FeeBumpTransaction; unwrap if so.
+        const inner = 'innerTransaction' in tx ? tx.innerTransaction : tx;
+        if (inner.source !== config.nursePublic) {
             return {
                 ok: false,
-                reason: `tx source ${tx.source_account} != expected nurse ${config.nursePublic}`,
+                reason: `tx source ${inner.source} != expected nurse ${config.nursePublic}`,
             };
         }
         return { ok: true };
