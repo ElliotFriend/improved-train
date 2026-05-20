@@ -1,60 +1,64 @@
-# /a2a — Agent-to-Agent Private Payment Flow
+# /a2a — Agent-to-Agent Private Payment (stellar-private-payments)
 
-Patient agent ↔ nurse agent, settled via a real Stellar privacy-pool withdrawal.
+Patient agent runs in the **browser** (Nethermind stellar-private-payments WASM);
+nurse stays server-side. The patient generates a Groth16 withdrawal proof locally,
+signs the resulting `transact()` invocation through Freighter, and submits via
+Soroban RPC. The nurse just verifies the on-chain tx and returns the reply.
 
-## Protocol
-
-1. **Patient calls nurse without payment** — `POST /api/a2a/consult { question }`
-   → nurse responds **402** with `{ challenge: { recipient, amount, contractId, ... } }`.
-2. **Patient agent runs payment protocol** — `POST /api/a2a/pay`
-   → server streams NDJSON: `snarkjs.groth16.fullProve()` generates the witness + Groth16
-   proof in-process, a small TS helper encodes the proof + public signals for Soroban,
-   and `@stellar/stellar-sdk` builds, signs (with the nurse keypair) and submits the
-   `withdraw()` invocation. Final event carries the tx hash.
-3. **Patient retries with receipt** — `POST /api/a2a/consult` + `X-Payment-Tx: <hash>`
-   → nurse verifies the tx on Horizon (successful, source = nurse), then calls Claude
-   and returns the reply.
-
-No external binaries are shelled out. The function bundle ships `main.wasm` + `main_final.zkey`
-+ the precomputed `withdrawal_input.json`; everything else happens in-process.
-
-## Why the nurse signs
-
-The pool's `withdraw(to, proof, pub_signals)` does `to.require_auth()`, so the
-**recipient** must authorize the transaction. The patient generates the proof
-off-chain and hands it to the nurse, which builds and signs the invocation. This
-means the nurse opting in to receive a privacy-pool payment is explicit — payments
-can't be forced onto an unwilling recipient.
-
-## Bundled assets (Vercel-friendly)
+## Flow
 
 ```
-src/lib/a2a/assets/
-  main.wasm                  circom-compiled withdrawal circuit (~1.2 MB)
-  main_final.zkey            Groth16 zkey (~12 MB)
-  withdrawals/{0..N-1}.json  per-coin withdrawal inputs
-  nullifier_hashes.json      decimal nullifier_hash[i] for each coin
+patient browser  → nurse server : POST /api/a2a/consult { question }
+nurse server     → patient      : 402 + { recipient, amountStroops, pool, asp_* }
+patient browser  : connect Freighter, derive privacy keys (one-time, 2 signMessage prompts)
+patient browser  : pick input notes whose sum ≥ amount; client.proveWithdraw(...)
+patient browser  : submitProvedPoolTransact via Freighter → tx hash
+patient browser  → nurse server : POST /api/a2a/consult + X-Payment-Tx
+nurse server     : RPC getTransaction → SUCCESS + targets pool contract → Claude reply
 ```
-
-These are produced by `scripts/a2a-setup.sh`, which deploys a fresh pool, deposits
-`COIN_COUNT` (default 4) coins, pins the association root with all labels, and
-emits one `withdrawal_input` + one `nullifier_hash` per coin. The
-`A2A_PRIVACY_POOL_ID` env var pairs the bundle with the deployed pool.
-
-Per request, the server reads the on-chain `get_nullifiers` set and spends the
-first bundled coin whose `nullifier_hash` isn't in it. Once all coins are spent
-the endpoint returns a clear "re-run setup" error.
-
-The 4-coin cap comes from the on-chain association tree's depth-2 layout
-(max 4 labels). The multi-deposit was previously budget-blocked but landed once
-CAP-75 added Poseidon as a Soroban host function in protocol 26.
 
 ## Files
 
 ```
-+page.svelte                          Patient UI + protocol step viewer
-../api/a2a/consult/+server.ts         Nurse endpoint (402 / verify / advise)
-../api/a2a/pay/+server.ts             Patient endpoint (NDJSON stream)
-../../lib/a2a/server.ts               snarkjs + stellar-sdk + Soroban encoding
-../../lib/a2a/assets/                 Bundled wasm + zkey + withdrawal input
++page.svelte                  Patient UI: phases (init/wallet/keys/ready/asking/replied)
+../api/a2a/consult/+server.ts Nurse endpoint (402 / verify / reply)
+../../lib/a2a/server.ts       Soroban RPC verifier (envelope-decode + pool-id check)
+../../lib/spp/                Vendored upstream JS facades (wallet, stellar, wasm-facade)
+/static/spp/                  Vendored WASM bundle + circuits + LGPL legal files
 ```
+
+## Contracts
+
+Uses the Nethermind testnet deployment as-is (no fresh deploy needed):
+
+- pool: `CAR5DPP35QGWZAYGOHYNGE5WBVI4BXDGT5MRAYYGG6UT64Y4LVKB3EJX`
+- asp_membership: `CDXEYQIMM2TRFDO3E4XSILWEB4GOJXZO7D42KYYQYO4HMFAVBCEDQ2C6`
+- asp_non_membership: `CAWCTK7Y2TS6SMGWLTIZURRKN3JN4WZPF4ZIROVRVL5KCCMVVFHMSYZU`
+- verifier: `CA5A3TGKHMAQIZPKNAWKU2NFHR4Z57UUVHLHU75Z4OUQV6K7RBRVFQHB`
+
+## Known gaps (scaffolding-only at this commit)
+
+- **ASP registration**: `proveWithdraw` only succeeds for users whose pubkey is
+  in the upstream ASP membership tree, whose admin is
+  `GDF4BXPQY5N4BEO24UIHM4NVB62MW7HDWH7SVHKLVZAMLP5IIHCFQORC`. The patient will
+  hit "ASP registration required" until added (either via that admin or by
+  deploying our own pool with us as admin).
+- **No deposit UI**: the patient needs notes in the pool to withdraw. Currently
+  the page assumes they exist; we'll need a "Deposit" sub-flow to seed them.
+- **Worker URL patch**: spp's Rust spawns workers as `./js/storage-worker.js`,
+  resolved against the page base. `$lib/spp/wasm-facade.js` monkey-patches the
+  `Worker` constructor to rewrite those to `/spp/js/*`. Brittle; ideally
+  upstream takes a `worker_base_url` config.
+
+## Wallet & WASM init
+
+```js
+// On mount (browser-only):
+const { initializeWasm } = await import('$lib/spp/wasm-facade.js');
+const handle = await initializeWasm('https://soroban-testnet.stellar.org');
+const client = handle.client();
+```
+
+The `initializeWasm` helper monkey-patches `window.Worker` (for spp worker URLs)
+and dynamically imports `/spp/js/web.js` via a `Function()` trick to keep
+Rollup's static resolver from trying to bundle the runtime asset.

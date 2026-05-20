@@ -30,12 +30,14 @@ export const POST: RequestHandler = async ({ request }) => {
             {
                 error: 'Payment Required',
                 challenge: {
-                    scheme: 'stellar-privacy-pool',
+                    scheme: 'stellar-private-payments',
                     network: config.network,
                     recipient: config.nursePublic,
                     asset: 'native',
-                    amount: config.amountXlm,
-                    contractId: config.privacyPoolId,
+                    amountStroops: config.amountStroops,
+                    pool: config.poolContractId,
+                    aspMembership: config.aspMembershipId,
+                    aspNonMembership: config.aspNonMembershipId,
                     description: 'Private consultation with nurse agent',
                 },
             },
@@ -52,8 +54,7 @@ export const POST: RequestHandler = async ({ request }) => {
         return json({
             advice:
                 '_(Nurse agent is unconfigured -- set `ANTHROPIC_API_KEY` in `.env` to generate a real reply.)_\n\n' +
-                `Settlement verified on Horizon: \`${paymentTx}\` (privacy-pool withdraw, ` +
-                `${config.amountXlm} XLM to nurse).`,
+                `Settlement verified on RPC: \`${paymentTx}\` (pool transact targeting ${config.poolContractId.slice(0, 10)}...).`,
             paymentTx,
         });
     }

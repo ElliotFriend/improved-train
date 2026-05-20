@@ -1,259 +1,333 @@
 <script lang="ts">
+    import { onMount } from 'svelte';
     import Markdown from '@humanspeak/svelte-markdown';
 
-    type StepKind = 'request' | 'challenge' | 'protocol' | 'settled' | 'verify' | 'data' | 'error';
-
-    interface FlowStep {
-        kind: StepKind;
-        label: string;
-        detail?: string;
-        link?: { href: string; text: string };
-    }
+    type Phase =
+        | 'init'
+        | 'no-freighter'
+        | 'wallet'
+        | 'keys'
+        | 'ready'
+        | 'asking'
+        | 'replied'
+        | 'error';
 
     interface Challenge {
         scheme: string;
-        recipient: string;
-        asset: string;
-        amount: string;
         network: string;
-        contractId: string | null;
-        groth16VerifierId: string | null;
+        recipient: string;
+        amountStroops: string;
+        pool: string;
+        aspMembership: string;
+        aspNonMembership: string;
         description: string;
     }
 
+    let phase = $state<Phase>('init');
+    let statusMsg = $state('Loading WASM…');
+    let errorMsg = $state('');
+
+    let address = $state<string | null>(null);
+    let noteCount = $state<number | null>(null);
     let question = $state(
         "I've had a dull headache and mild dizziness on and off for three days. No fever. Should I worry?",
     );
-    let flowSteps: FlowStep[] = $state([]);
     let advice = $state('');
-    let isLoading = $state(false);
+    let txHash = $state<string | null>(null);
 
-    const stepStyles: Record<StepKind, string> = {
-        request: 'bg-gray-100 text-gray-700',
-        challenge: 'bg-amber-100 text-amber-700',
-        protocol: 'bg-indigo-100 text-indigo-700',
-        settled: 'bg-purple-100 text-purple-700',
-        verify: 'bg-purple-100 text-purple-700',
-        data: 'bg-green-100 text-green-700',
-        error: 'bg-red-100 text-red-700',
+    // The runtime WASM client (typed as unknown — see $lib/spp/web.d.ts for the
+    // surface we care about).
+    type WebClient = {
+        getUserKeys(addr: string): Promise<unknown>;
+        getUserNotes(addr: string, limit: number): Promise<{ id: string; amount: string }[]>;
+        proveWithdraw(
+            addr: string,
+            membershipBlinding: bigint,
+            recipient: string,
+            inputNoteIds: string[],
+            onStatus?: (p: { stage?: string; message?: string }) => void,
+        ): Promise<unknown>;
+        spendingKeyMessage(): string;
+        encryptionDerivationMessage(): string;
+        deriveAndSaveUserKeys(
+            addr: string,
+            spendingSig: string,
+            encryptionSig: string,
+        ): Promise<void>;
+        proveDeposit(
+            addr: string,
+            membershipBlinding: bigint,
+            amountStroops: bigint,
+            outputAmounts: bigint[],
+            onStatus?: (p: { stage?: string; message?: string }) => void,
+        ): Promise<unknown>;
     };
+    let client = $state<WebClient | null>(null);
 
-    function pushStep(step: FlowStep) {
-        flowSteps.push(step);
+    const RPC_URL = 'https://soroban-testnet.stellar.org';
+
+    onMount(async () => {
+        try {
+            const { initializeWasm } = await import('$lib/spp/wasm-facade.js');
+            const handle = await initializeWasm(RPC_URL);
+            client = handle.client();
+            statusMsg = 'WASM ready';
+
+            // Probe Freighter
+            const fg = await import('@stellar/freighter-api');
+            const conn = await fg.isConnected();
+            if (conn?.error || !conn?.isConnected) {
+                phase = 'no-freighter';
+                statusMsg = 'Freighter wallet not detected.';
+                return;
+            }
+            phase = 'wallet';
+        } catch (err) {
+            phase = 'error';
+            errorMsg = err instanceof Error ? err.message : String(err);
+        }
+    });
+
+    async function connectWallet() {
+        try {
+            statusMsg = 'Requesting wallet access…';
+            const fg = await import('@stellar/freighter-api');
+            const access = await fg.requestAccess();
+            if (access.error) throw new Error(access.error);
+            address = access.address;
+            statusMsg = `Connected ${address!.slice(0, 6)}…${address!.slice(-4)}`;
+            await refreshState();
+        } catch (err) {
+            phase = 'error';
+            errorMsg = err instanceof Error ? err.message : String(err);
+        }
+    }
+
+    async function refreshState() {
+        if (!client || !address) return;
+        const keys = await client.getUserKeys(address);
+        if (!keys) {
+            phase = 'keys';
+            return;
+        }
+        const notes = await client.getUserNotes(address, 50);
+        noteCount = notes?.length ?? 0;
+        phase = 'ready';
+    }
+
+    async function deriveKeys() {
+        try {
+            if (!client || !address) throw new Error('not ready');
+            const fg = await import('@stellar/freighter-api');
+            statusMsg = 'Signing spending-key message…';
+            const sk = await fg.signMessage(client.spendingKeyMessage(), { address });
+            if (sk.error) throw new Error(sk.error);
+            statusMsg = 'Signing encryption-key message…';
+            const ek = await fg.signMessage(client.encryptionDerivationMessage(), { address });
+            if (ek.error) throw new Error(ek.error);
+            statusMsg = 'Deriving keys…';
+            // freighter-api returns { signedMessage: Uint8Array | string }; convert to base64
+            const toB64 = (sig: unknown) =>
+                typeof sig === 'string' ? sig : btoa(String.fromCharCode(...(sig as Uint8Array)));
+            await client.deriveAndSaveUserKeys(
+                address,
+                toB64(sk.signedMessage),
+                toB64(ek.signedMessage),
+            );
+            await refreshState();
+        } catch (err) {
+            phase = 'error';
+            errorMsg = err instanceof Error ? err.message : String(err);
+        }
     }
 
     async function askNurse() {
-        if (!question.trim() || isLoading) return;
-        flowSteps = [];
-        advice = '';
-        isLoading = true;
-
         try {
-            pushStep({ kind: 'request', label: 'POST /api/a2a/consult', detail: 'no payment' });
+            if (!client || !address) throw new Error('not ready');
+            phase = 'asking';
+            statusMsg = 'Fetching 402 challenge…';
             const initial = await fetch('/api/a2a/consult', {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
                 body: JSON.stringify({ question }),
             });
-
             if (initial.status !== 402) {
-                const body = await initial.text();
-                pushStep({ kind: 'error', label: `Unexpected ${initial.status}`, detail: body });
-                return;
+                throw new Error(`expected 402, got ${initial.status}`);
             }
-
             const { challenge }: { challenge: Challenge } = await initial.json();
-            const poolNote = challenge.contractId
-                ? `pool ${challenge.contractId.slice(0, 6)}...`
-                : 'pool not initialized';
-            pushStep({
-                kind: 'challenge',
-                label: `402 Payment Required (${challenge.scheme})`,
-                detail: `${challenge.amount} XLM to ${challenge.recipient.slice(0, 6)}...${challenge.recipient.slice(-4)} via ${poolNote}`,
-                link: challenge.contractId
-                    ? {
-                          href: `https://stellar.expert/explorer/testnet/contract/${challenge.contractId}`,
-                          text: 'View privacy-pool contract',
-                      }
-                    : undefined,
-            });
+            statusMsg = `Pool ${challenge.pool.slice(0, 6)}…  amount ${challenge.amountStroops} stroops`;
 
-            pushStep({ kind: 'protocol', label: 'Patient agent begins payment protocol' });
-
-            const payRes = await fetch('/api/a2a/pay', { method: 'POST' });
-            if (!payRes.body) throw new Error('no stream body');
-
-            let settlementHash: string | undefined;
-            const reader = payRes.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                buffer += decoder.decode(value, { stream: true });
-                let nl: number;
-                while ((nl = buffer.indexOf('\n')) !== -1) {
-                    const line = buffer.slice(0, nl).trim();
-                    buffer = buffer.slice(nl + 1);
-                    if (!line) continue;
-                    const event = JSON.parse(line) as
-                        | { kind: 'step'; label: string; detail?: string }
-                        | { kind: 'settled'; hash: string; ledger: number; explorer: string }
-                        | { kind: 'error'; message: string };
-
-                    if (event.kind === 'step') {
-                        pushStep({ kind: 'protocol', label: event.label, detail: event.detail });
-                    } else if (event.kind === 'settled') {
-                        settlementHash = event.hash;
-                        pushStep({
-                            kind: 'settled',
-                            label: 'Settlement confirmed on ledger',
-                            detail: `ledger ${event.ledger}  ·  tx ${event.hash.slice(0, 10)}...`,
-                            link: { href: event.explorer, text: 'View on Stellar Expert' },
-                        });
-                    } else if (event.kind === 'error') {
-                        pushStep({ kind: 'error', label: 'Payment failed', detail: event.message });
-                        return;
-                    }
-                }
+            // Pick input notes (greedy)
+            const notes = await client.getUserNotes(address, 50);
+            const need = BigInt(challenge.amountStroops);
+            const picked: { id: string; amount: string }[] = [];
+            let sum = 0n;
+            for (const n of notes ?? []) {
+                if (sum >= need) break;
+                if (picked.length >= 2) break;
+                picked.push(n);
+                sum += BigInt(n.amount);
+            }
+            if (sum < need) {
+                throw new Error(
+                    `Insufficient notes: have ${sum} stroops, need ${need}. Deposit some XLM first.`,
+                );
             }
 
-            if (!settlementHash) {
-                pushStep({ kind: 'error', label: 'No settlement hash returned' });
-                return;
+            statusMsg = 'Generating Groth16 proof in browser (this can take ~10s)…';
+            const proved = await client.proveWithdraw(
+                address,
+                0n, // membership blinding -- TODO derive from ASP-registered key
+                challenge.recipient,
+                picked.map((n) => n.id),
+                (p) => {
+                    if (p?.message) statusMsg = p.message;
+                },
+            );
+            if (proved == null) {
+                throw new Error(
+                    'proveWithdraw returned null (ASP registration or membership-blinding mismatch?)',
+                );
             }
 
-            pushStep({
-                kind: 'verify',
-                label: 'Re-requesting consult with payment receipt',
-                detail: `X-Payment-Tx: ${settlementHash.slice(0, 12)}...`,
-            });
+            const { submitProvedPoolTransact } = await import('$lib/spp/stellar.js');
+            statusMsg = 'Awaiting Freighter signature…';
+            const networkPassphrase = 'Test SDF Network ; September 2015';
+            const submittedHash = await submitProvedPoolTransact(
+                proved,
+                {
+                    address,
+                    rpcUrl: RPC_URL,
+                    networkPassphrase,
+                    poolContractId: challenge.pool,
+                },
+                {
+                    onStatus: (p: { message?: string }) => {
+                        if (p?.message) statusMsg = p.message;
+                    },
+                },
+            );
+            txHash = submittedHash;
 
+            statusMsg = 'Verifying settlement with nurse…';
             const final = await fetch('/api/a2a/consult', {
                 method: 'POST',
-                headers: { 'content-type': 'application/json', 'x-payment-tx': settlementHash },
+                headers: { 'content-type': 'application/json', 'x-payment-tx': submittedHash },
                 body: JSON.stringify({ question }),
             });
-
             if (!final.ok) {
-                const body = await final.text();
-                pushStep({ kind: 'error', label: `Consult failed (${final.status})`, detail: body });
-                return;
+                throw new Error(`consult failed (${final.status}): ${await final.text()}`);
             }
-
-            const { advice: nurseAdvice } = (await final.json()) as { advice: string };
-            advice = nurseAdvice;
-            pushStep({
-                kind: 'data',
-                label: 'Nurse agent response received',
-                detail: `${nurseAdvice.length} chars`,
-            });
+            advice = (await final.json()).advice;
+            phase = 'replied';
+            statusMsg = `Replied (tx ${submittedHash.slice(0, 12)}…)`;
         } catch (err) {
-            pushStep({
-                kind: 'error',
-                label: 'Request failed',
-                detail: err instanceof Error ? err.message : String(err),
-            });
-        } finally {
-            isLoading = false;
+            phase = 'error';
+            errorMsg = err instanceof Error ? err.message : String(err);
         }
     }
 </script>
 
-<div class="space-y-8">
+<div class="space-y-6">
     <div>
         <div class="text-sm font-medium text-purple-600">Agent-to-Agent</div>
         <h1 class="text-2xl font-bold tracking-tight">Private Medical Consult</h1>
         <p class="mt-1 text-sm text-gray-500">
-            The patient agent asks the nurse a question. The nurse replies HTTP 402 naming a
-            privacy-pool contract and a recipient. The patient agent generates a Groth16 ZK
-            proof and withdraws 1 XLM from the pool to the nurse. The nurse verifies the
-            settlement on Horizon and replies. Real on-chain proof, real on-chain withdraw, real
-            unlinkability.
+            Patient agent runs in your browser. Privacy proof is generated locally via the
+            Nethermind stellar-private-payments WASM bundle; the withdrawal is signed with
+            Freighter and submitted via Soroban RPC. The nurse server only verifies the
+            transaction on-chain and returns Claude-generated guidance.
         </p>
     </div>
 
-    <div class="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
-        One-shot per setup run: a privacy-pool insert exceeds Soroban's budget on the second
-        deposit (see CAP-75), so each pool is single-use today. Re-run
-        <code>scripts/a2a-setup.sh</code> between demos to deploy a fresh pool with a fresh
-        deposited coin.
+    <div class="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs">
+        <div class="font-medium text-gray-700">Status</div>
+        <div class="break-all text-gray-600">{statusMsg}</div>
+        {#if errorMsg}
+            <div class="mt-1 text-red-700">Error: {errorMsg}</div>
+        {/if}
     </div>
 
-    <div>
-        <label for="q" class="block text-sm font-medium text-gray-700">
-            Ask the nurse agent
-        </label>
-        <textarea
-            id="q"
-            bind:value={question}
-            rows="3"
-            class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-sm"
-        ></textarea>
-        <div class="mt-3 flex justify-end">
-            <button
-                onclick={askNurse}
-                disabled={isLoading || !question.trim()}
-                class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+    {#if phase === 'init'}
+        <p class="text-sm text-gray-500">Loading WASM…</p>
+    {:else if phase === 'no-freighter'}
+        <div class="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+            Freighter wallet is required for this demo.
+            <a class="underline" href="https://www.freighter.app/" target="_blank" rel="noopener"
+                >Install Freighter</a
             >
-                {isLoading ? 'Consulting...' : 'Ask Nurse Agent'}
+            and reload this page.
+        </div>
+    {:else if phase === 'wallet'}
+        <button
+            class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+            onclick={connectWallet}
+        >
+            Connect Freighter
+        </button>
+    {:else if phase === 'keys'}
+        <div class="space-y-3 text-sm">
+            <p>
+                One-time setup: derive privacy keys by signing two messages with your wallet.
+                Freighter will prompt twice.
+            </p>
+            <button
+                class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700"
+                onclick={deriveKeys}
+            >
+                Derive privacy keys
             </button>
         </div>
-    </div>
-
-    {#if flowSteps.length > 0}
-        <div class="rounded-lg border border-gray-200 bg-white p-5">
-            <h2 class="mb-4 text-sm font-semibold text-gray-700">Protocol Flow</h2>
-            <ol class="space-y-3">
-                {#each flowSteps as step, i (`a2a-${i}`)}
-                    <li class="flex items-start gap-3">
-                        <span
-                            class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold {stepStyles[
-                                step.kind
-                            ]}"
-                        >
-                            {i + 1}
-                        </span>
-                        <div class="min-w-0">
-                            <div class="text-sm font-medium text-gray-900">{step.label}</div>
-                            {#if step.detail}
-                                <div class="text-xs break-all text-gray-500">{step.detail}</div>
-                            {/if}
-                            {#if step.link}
-                                <a
-                                    href={step.link.href}
-                                    target="_blank"
-                                    rel="external noopener noreferrer"
-                                    class="mt-0.5 inline-block text-xs font-medium text-indigo-600 underline"
-                                >
-                                    {step.link.text} &rarr;
-                                </a>
-                            {/if}
-                        </div>
-                    </li>
-                {/each}
-                {#if isLoading}
-                    <li class="flex items-start gap-3">
-                        <span
-                            class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-indigo-100"
-                        >
-                            <span
-                                class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent"
-                            ></span>
-                        </span>
-                        <span class="text-sm text-gray-500">Working...</span>
-                    </li>
-                {/if}
-            </ol>
+    {:else if phase === 'ready' || phase === 'asking' || phase === 'replied'}
+        <div class="rounded-md bg-white p-3 text-xs text-gray-700">
+            Connected as <code>{address?.slice(0, 6)}…{address?.slice(-4)}</code> · notes in pool:
+            <code>{noteCount ?? '?'}</code>
         </div>
-    {/if}
 
-    {#if advice}
-        <div class="rounded-lg border border-green-200 bg-green-50 p-5">
-            <h2 class="mb-3 text-sm font-semibold text-green-800">Nurse Agent Response</h2>
-            <div class="prose prose-sm max-w-none text-gray-900">
-                <Markdown source={advice} />
+        <div>
+            <label for="q" class="block text-sm font-medium text-gray-700">Ask the nurse agent</label
+            >
+            <textarea
+                id="q"
+                bind:value={question}
+                rows="3"
+                disabled={phase === 'asking'}
+                class="mt-1 block w-full rounded-md border-gray-300 text-sm shadow-sm"
+            ></textarea>
+            <div class="mt-3 flex justify-end">
+                <button
+                    class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    onclick={askNurse}
+                    disabled={phase === 'asking' || !question.trim()}
+                >
+                    {phase === 'asking' ? 'Working…' : 'Ask nurse'}
+                </button>
             </div>
+        </div>
+
+        {#if txHash}
+            <div class="text-xs text-gray-500">
+                Settlement tx:
+                <a
+                    class="underline"
+                    target="_blank"
+                    rel="noopener"
+                    href={`https://stellar.expert/explorer/testnet/tx/${txHash}`}>{txHash.slice(0, 16)}…</a
+                >
+            </div>
+        {/if}
+
+        {#if advice}
+            <div class="rounded-lg border border-green-200 bg-green-50 p-5">
+                <h2 class="mb-3 text-sm font-semibold text-green-800">Nurse Agent Response</h2>
+                <div class="prose prose-sm max-w-none text-gray-900">
+                    <Markdown source={advice} />
+                </div>
+            </div>
+        {/if}
+    {:else if phase === 'error'}
+        <div class="rounded-md border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+            Something went wrong. See status above.
         </div>
     {/if}
 </div>
