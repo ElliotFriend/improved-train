@@ -16,6 +16,8 @@
         asset: string;
         amount: string;
         network: string;
+        contractId: string | null;
+        groth16VerifierId: string | null;
         description: string;
     }
 
@@ -61,14 +63,19 @@
             }
 
             const { challenge }: { challenge: Challenge } = await initial.json();
+            const poolNote = challenge.contractId
+                ? `pool ${challenge.contractId.slice(0, 6)}...`
+                : 'pool not initialized';
             pushStep({
                 kind: 'challenge',
-                label: `402 Payment Required`,
-                detail: `${challenge.amount} XLM to ${challenge.recipient.slice(0, 6)}...${challenge.recipient.slice(-4)} on ${challenge.network}`,
-                link: {
-                    href: `https://stellar.expert/explorer/testnet/account/${challenge.recipient}`,
-                    text: 'View nurse account',
-                },
+                label: `402 Payment Required (${challenge.scheme})`,
+                detail: `${challenge.amount} XLM to ${challenge.recipient.slice(0, 6)}...${challenge.recipient.slice(-4)} via ${poolNote}`,
+                link: challenge.contractId
+                    ? {
+                          href: `https://stellar.expert/explorer/testnet/contract/${challenge.contractId}`,
+                          text: 'View privacy-pool contract',
+                      }
+                    : undefined,
             });
 
             pushStep({ kind: 'protocol', label: 'Patient agent begins payment protocol' });
@@ -156,12 +163,21 @@
 <div class="space-y-8">
     <div>
         <div class="text-sm font-medium text-purple-600">Agent-to-Agent</div>
-        <h1 class="text-2xl font-bold tracking-tight">Patient agent &rarr; Nurse agent</h1>
+        <h1 class="text-2xl font-bold tracking-tight">Private Medical Consult</h1>
         <p class="mt-1 text-sm text-gray-500">
-            The patient agent asks the nurse a medical question. The nurse replies with HTTP 402,
-            naming an account and amount. The patient agent autonomously settles the payment on
-            Stellar testnet and retries with the receipt; the nurse verifies on Horizon and replies.
+            The patient agent asks the nurse a question. The nurse replies HTTP 402 naming a
+            privacy-pool contract and a recipient. The patient agent generates a Groth16 ZK
+            proof and withdraws 1 XLM from the pool to the nurse. The nurse verifies the
+            settlement on Horizon and replies. Real on-chain proof, real on-chain withdraw, real
+            unlinkability.
         </p>
+    </div>
+
+    <div class="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+        One-shot per setup run: a privacy-pool insert exceeds Soroban's budget on the second
+        deposit (see CAP-75), so each pool is single-use today. Re-run
+        <code>scripts/a2a-setup.sh</code> between demos to deploy a fresh pool with a fresh
+        deposited coin.
     </div>
 
     <div>

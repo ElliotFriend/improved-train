@@ -21,3 +21,6 @@ Thumbs.db
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# A2A demo cache: privacy-pool coin secrets, state, association set, deployed contract IDs
+/.a2a

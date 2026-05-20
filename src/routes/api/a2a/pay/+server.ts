@@ -1,11 +1,6 @@
 import type { RequestHandler } from './$types';
-import { protocolSteps, submitPayment } from '$lib/a2a/server';
+import { coinAvailable, submitPrivacyPoolWithdraw } from '$lib/a2a/server';
 
-/**
- * NDJSON stream of the patient agent's payment protocol. Each line is one
- * step; the final line carries the settlement tx hash that the caller passes
- * back to the nurse endpoint via X-Payment-Tx.
- */
 export const POST: RequestHandler = async () => {
     const encoder = new TextEncoder();
 
@@ -15,13 +10,19 @@ export const POST: RequestHandler = async () => {
                 controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'));
 
             try {
-                for (const step of protocolSteps) {
-                    send({ kind: 'step', label: step.label, detail: step.detail });
-                    await new Promise((r) => setTimeout(r, step.durationMs));
+                if (!coinAvailable()) {
+                    send({
+                        kind: 'error',
+                        message:
+                            'No spendable coin in .a2a/ -- run scripts/a2a-setup.sh first ' +
+                            '(privacy-pool deposits are 1-shot today; re-run between demos).',
+                    });
+                    return;
                 }
 
-                send({ kind: 'step', label: 'Broadcasting transaction to Horizon' });
-                const { hash, ledger } = await submitPayment();
+                const { hash, ledger } = await submitPrivacyPoolWithdraw({
+                    step: (label, detail) => send({ kind: 'step', label, detail }),
+                });
 
                 send({
                     kind: 'settled',
@@ -30,10 +31,7 @@ export const POST: RequestHandler = async () => {
                     explorer: `https://stellar.expert/explorer/testnet/tx/${hash}`,
                 });
             } catch (err) {
-                send({
-                    kind: 'error',
-                    message: err instanceof Error ? err.message : String(err),
-                });
+                send({ kind: 'error', message: err instanceof Error ? err.message : String(err) });
             } finally {
                 controller.close();
             }
