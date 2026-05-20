@@ -9,10 +9,18 @@ import {
     nativeToScVal,
     rpc,
     scValToNative,
-    xdr,
 } from '@stellar/stellar-sdk';
+import type { xdr } from '@stellar/stellar-sdk';
 import { read } from '$app/server';
-import * as snarkjs from 'snarkjs';
+// snarkjs is loaded dynamically so vite's SSR build doesn't drag in its
+// `web-worker` transitive (which crashes when evaluated inside vite's build
+// worker threads).
+type Snarkjs = typeof import('snarkjs');
+let snarkjsCache: Snarkjs | null = null;
+async function loadSnarkjs(): Promise<Snarkjs> {
+    if (!snarkjsCache) snarkjsCache = await import('snarkjs');
+    return snarkjsCache;
+}
 import {
     A2A_NURSE_PUBLIC,
     A2A_NURSE_SECRET,
@@ -205,8 +213,9 @@ export async function submitPrivacyPoolWithdraw(
         'Generating Groth16 proof (BLS12-381)',
         'snarkjs in-process (witness + prove)',
     );
+    const snarkjs = await loadSnarkjs();
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(
-        choice.input as unknown as snarkjs.CircuitSignals,
+        choice.input as unknown as Parameters<typeof snarkjs.groth16.fullProve>[0],
         wasm,
         zkey,
     );
