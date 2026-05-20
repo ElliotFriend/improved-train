@@ -2,7 +2,7 @@ import type { RequestHandler } from './$types';
 import { json } from '@sveltejs/kit';
 import Anthropic from '@anthropic-ai/sdk';
 import { ANTHROPIC_API_KEY } from '$env/static/private';
-import { config, poolContext, verifyPayment } from '$lib/a2a/server';
+import { config, verifyPayment } from '$lib/a2a/server';
 
 const hasAnthropicKey = !!ANTHROPIC_API_KEY;
 const client = hasAnthropicKey ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
@@ -26,13 +26,6 @@ export const POST: RequestHandler = async ({ request }) => {
     const paymentTx = request.headers.get('x-payment-tx');
 
     if (!paymentTx) {
-        let ctx: ReturnType<typeof poolContext> | null = null;
-        try {
-            ctx = poolContext();
-        } catch {
-            // Setup hasn't been run yet; still return a 402 so the UI can show
-            // a helpful next-step.
-        }
         return json(
             {
                 error: 'Payment Required',
@@ -42,8 +35,7 @@ export const POST: RequestHandler = async ({ request }) => {
                     recipient: config.nursePublic,
                     asset: 'native',
                     amount: config.amountXlm,
-                    contractId: ctx?.privacyPoolId ?? null,
-                    groth16VerifierId: ctx?.groth16VerifierId ?? null,
+                    contractId: config.privacyPoolId,
                     description: 'Private consultation with nurse agent',
                 },
             },

@@ -1,5 +1,5 @@
 import type { RequestHandler } from './$types';
-import { coinAvailable, submitPrivacyPoolWithdraw } from '$lib/a2a/server';
+import { submitPrivacyPoolWithdraw } from '$lib/a2a/server';
 
 export const POST: RequestHandler = async () => {
     const encoder = new TextEncoder();
@@ -10,20 +10,9 @@ export const POST: RequestHandler = async () => {
                 controller.enqueue(encoder.encode(JSON.stringify(obj) + '\n'));
 
             try {
-                if (!coinAvailable()) {
-                    send({
-                        kind: 'error',
-                        message:
-                            'No spendable coin in .a2a/ -- run scripts/a2a-setup.sh first ' +
-                            '(privacy-pool deposits are 1-shot today; re-run between demos).',
-                    });
-                    return;
-                }
-
                 const { hash, ledger } = await submitPrivacyPoolWithdraw({
                     step: (label, detail) => send({ kind: 'step', label, detail }),
                 });
-
                 send({
                     kind: 'settled',
                     hash,

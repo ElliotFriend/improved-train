@@ -1,27 +1,39 @@
-import { Horizon } from '@stellar/stellar-sdk';
-import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { promisify } from 'node:util';
 import {
-    A2A_PATIENT_PUBLIC,
+    Address,
+    BASE_FEE,
+    Contract,
+    Horizon,
+    Keypair,
+    Networks,
+    TransactionBuilder,
+    nativeToScVal,
+    rpc,
+    scValToNative,
+    xdr,
+} from '@stellar/stellar-sdk';
+import { read } from '$app/server';
+import * as snarkjs from 'snarkjs';
+import {
     A2A_NURSE_PUBLIC,
-    A2A_NURSE_ALIAS,
-    A2A_CACHE_DIR,
+    A2A_NURSE_SECRET,
+    A2A_PRIVACY_POOL_ID,
     A2A_NETWORK,
 } from '$env/static/private';
 
-const execFileAsync = promisify(execFile);
+import withdrawalInput from './assets/withdrawal_input.json';
+import wasmUrl from './assets/main.wasm?url';
+import zkeyUrl from './assets/main_final.zkey?url';
 
 export const config = {
-    patientPublic: A2A_PATIENT_PUBLIC,
     nursePublic: A2A_NURSE_PUBLIC,
-    nurseAlias: A2A_NURSE_ALIAS,
-    cacheDir: A2A_CACHE_DIR,
+    nurseSecret: A2A_NURSE_SECRET,
+    privacyPoolId: A2A_PRIVACY_POOL_ID,
     network: A2A_NETWORK,
-    amountXlm: '1', // FIXED_AMOUNT in the contract is 1 XLM
+    amountXlm: '1', // FIXED_AMOUNT in the contract = 1 XLM
 };
+
+const NETWORK_PASSPHRASE =
+    config.network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
 
 const horizon = new Horizon.Server(
     config.network === 'testnet'
@@ -29,175 +41,187 @@ const horizon = new Horizon.Server(
         : 'https://horizon.stellar.org',
 );
 
-interface PoolContext {
-    privacyPoolId: string;
-    groth16VerifierId: string;
-    privacyPoolsDir: string;
-}
+const sorobanRpc = new rpc.Server(
+    config.network === 'testnet'
+        ? 'https://soroban-testnet.stellar.org'
+        : 'https://soroban.stellar.org',
+);
 
-function readContracts(): PoolContext {
-    const envPath = join(config.cacheDir, 'contracts.env');
-    if (!existsSync(envPath)) {
-        throw new Error(
-            `${envPath} not found. Run scripts/a2a-setup.sh to deploy a pool and deposit a coin.`,
-        );
+// Load the circuit assets once per function instance.
+let circuitCache: { wasm: Uint8Array; zkey: Uint8Array } | null = null;
+async function loadCircuits() {
+    if (!circuitCache) {
+        const [wasm, zkey] = await Promise.all([
+            read(wasmUrl)
+                .arrayBuffer()
+                .then((b) => new Uint8Array(b)),
+            read(zkeyUrl)
+                .arrayBuffer()
+                .then((b) => new Uint8Array(b)),
+        ]);
+        circuitCache = { wasm, zkey };
     }
-    const lines = readFileSync(envPath, 'utf8').split('\n');
-    const map: Record<string, string> = {};
-    for (const line of lines) {
-        const m = line.match(/^(\w+)=(.*)$/);
-        if (m) map[m[1]] = m[2];
+    return circuitCache;
+}
+
+// ---------- Soroban encoding (matches stellar-circom2soroban) ----------
+//
+// G1Affine bytes:    x (48 BE) || y (48 BE)                        = 96 bytes
+// G2Affine bytes:    x.c0 (48 BE) || x.c1 (48 BE)
+//                 || y.c0 (48 BE) || y.c1 (48 BE)                  = 192 bytes
+// Fr bytes:          32 BE
+// Proof.to_bytes:    G1 || G2 || G1                                 = 384 bytes
+// PublicSignals.to_bytes: u32_be(len) || Fr * len                   = 4 + n*32
+
+function feBytes(decimal: string, byteLen: number): Uint8Array {
+    let hex = BigInt(decimal).toString(16);
+    if (hex.length > byteLen * 2) throw new Error(`value too large for ${byteLen} bytes`);
+    hex = hex.padStart(byteLen * 2, '0');
+    const out = new Uint8Array(byteLen);
+    for (let i = 0; i < byteLen; i++) {
+        out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
     }
-    return {
-        privacyPoolId: map.PRIVACY_POOL_ID,
-        groth16VerifierId: map.GROTH16_VERIFIER_ID,
-        privacyPoolsDir: map.PRIVACY_POOLS_DIR,
-    };
+    return out;
 }
 
-export function poolContext(): PoolContext {
-    return readContracts();
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+    const len = parts.reduce((n, p) => n + p.length, 0);
+    const out = new Uint8Array(len);
+    let off = 0;
+    for (const p of parts) {
+        out.set(p, off);
+        off += p.length;
+    }
+    return out;
 }
 
-function spentFlagPath() {
-    return join(config.cacheDir, 'spent');
+interface SnarkjsProof {
+    pi_a: string[];
+    pi_b: string[][];
+    pi_c: string[];
 }
 
-export function coinAvailable(): boolean {
-    return (
-        existsSync(join(config.cacheDir, 'coin.json')) &&
-        existsSync(join(config.cacheDir, 'state.json')) &&
-        existsSync(join(config.cacheDir, 'association.json')) &&
-        !existsSync(spentFlagPath())
+function encodeProof(proof: SnarkjsProof): Uint8Array {
+    const a = concatBytes(feBytes(proof.pi_a[0], 48), feBytes(proof.pi_a[1], 48));
+    // For BLS12-381 G2, Fq2 elements are serialized as c1 || c0 (IETF / Zcash
+    // convention, which ark_bls12_381 follows). snarkjs writes pi_b[i] as
+    // [c0, c1], so we swap when packing.
+    const b = concatBytes(
+        feBytes(proof.pi_b[0][1], 48),
+        feBytes(proof.pi_b[0][0], 48),
+        feBytes(proof.pi_b[1][1], 48),
+        feBytes(proof.pi_b[1][0], 48),
     );
+    const c = concatBytes(feBytes(proof.pi_c[0], 48), feBytes(proof.pi_c[1], 48));
+    return concatBytes(a, b, c);
 }
 
-function extractHex(stdout: string, label: string): string {
-    const lines = stdout.split('\n');
-    const idx = lines.findIndex((l) => l.startsWith(label));
-    if (idx === -1 || !lines[idx + 1]) {
-        throw new Error(`could not parse ${label} from circom2soroban output`);
-    }
-    return lines[idx + 1].trim();
+function encodePublicSignals(signals: string[]): Uint8Array {
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, signals.length, false);
+    const frs = signals.map((s) => feBytes(s, 32));
+    return concatBytes(len, ...frs);
 }
+
+// ---------- Step events for the NDJSON stream ----------
 
 export interface WithdrawProgress {
     step: (label: string, detail?: string) => void;
 }
 
-/**
- * Real privacy-pool withdrawal:
- *   1. coinutils withdraw -> withdrawal_input.json
- *   2. circom witness gen -> witness.wtns
- *   3. snarkjs groth16 prove -> proof.json + public.json
- *   4. circom2soroban -> hex
- *   5. stellar contract invoke withdraw --source nurse  (to.require_auth())
- */
+// ---------- Real privacy-pool withdrawal ----------
+
 export async function submitPrivacyPoolWithdraw(
     progress: WithdrawProgress,
 ): Promise<{ hash: string; ledger: number }> {
-    if (!coinAvailable()) {
-        throw new Error(
-            'No spendable coin in .a2a/ -- run scripts/a2a-setup.sh first ' +
-                '(or again, if the previous coin has been spent).',
-        );
-    }
-    const ctx = readContracts();
-    const ppDir = ctx.privacyPoolsDir;
-    const cache = config.cacheDir;
-    const work = join(tmpdir(), `a2a-${Date.now()}`);
-    mkdirSync(work, { recursive: true });
-
-    const coin = join(cache, 'coin.json');
-    const state = join(cache, 'state.json');
-    const assoc = join(cache, 'association.json');
-    const withdrawalInput = join(work, 'withdrawal_input.json');
-    const witness = join(work, 'witness.wtns');
-    const proofJson = join(work, 'proof.json');
-    const publicJson = join(work, 'public.json');
-
-    const coinutils = join(ppDir, 'target/release/stellar-coinutils');
-    const circom2soroban = join(ppDir, 'target/release/stellar-circom2soroban');
-    const witnessJs = join(ppDir, 'circuits/build/main_js/generate_witness.js');
-    const mainWasm = join(ppDir, 'circuits/build/main_js/main.wasm');
-    const zkey = join(ppDir, 'circuits/output/main_final.zkey');
-
-    progress.step('Building withdrawal input from coin + state', 'coinutils withdraw');
-    await execFileAsync(coinutils, ['withdraw', coin, state, assoc, '-o', withdrawalInput]);
-
-    progress.step('Generating circuit witness', 'circom main.wasm');
-    await execFileAsync('node', [witnessJs, mainWasm, withdrawalInput, witness]);
-
-    progress.step('Generating Groth16 proof (BLS12-381)', 'snarkjs groth16 prove');
-    await execFileAsync('snarkjs', ['groth16', 'prove', zkey, witness, proofJson, publicJson]);
-
-    progress.step('Encoding proof for Soroban', 'circom2soroban');
-    const { stdout: proofOut } = await execFileAsync(circom2soroban, ['proof', proofJson]);
-    const { stdout: publicOut } = await execFileAsync(circom2soroban, ['public', publicJson]);
-    const proofHex = extractHex(proofOut, 'Proof Hex encoding:');
-    const publicHex = extractHex(publicOut, 'Public signals Hex encoding:');
+    progress.step('Loading circuit assets', 'main.wasm + main_final.zkey');
+    const { wasm, zkey } = await loadCircuits();
 
     progress.step(
-        'Submitting withdraw() to privacy pool',
-        `${ctx.privacyPoolId.slice(0, 8)}... source=nurse (to.require_auth)`,
+        'Generating Groth16 proof (BLS12-381)',
+        'snarkjs in-process (witness + prove)',
     );
-    const invoke = await execFileAsync(
-        'stellar',
-        [
-            'contract',
-            'invoke',
-            '--id',
-            ctx.privacyPoolId,
-            '--source',
-            config.nurseAlias,
-            '--network',
-            config.network,
-            '--send=yes',
-            '--',
-            'withdraw',
-            '--to',
-            config.nurseAlias,
-            '--proof_bytes',
-            proofHex,
-            '--pub_signals_bytes',
-            publicHex,
-        ],
-        { maxBuffer: 16 * 1024 * 1024 },
+    const { proof, publicSignals } = await snarkjs.groth16.fullProve(
+        withdrawalInput as unknown as snarkjs.CircuitSignals,
+        wasm,
+        zkey,
     );
 
-    // stellar CLI prints the tx hash on stderr alongside the explorer link.
-    const combined = invoke.stdout + '\n' + invoke.stderr;
-    const hashMatch = combined.match(/tx\/([0-9a-f]{64})/);
-    if (!hashMatch) {
-        throw new Error('could not extract tx hash from stellar invoke output');
+    progress.step('Encoding proof for Soroban verifier');
+    const proofBytes = encodeProof(proof as unknown as SnarkjsProof);
+    const publicBytes = encodePublicSignals(publicSignals as string[]);
+
+    progress.step(
+        'Building withdraw() invocation',
+        `pool ${config.privacyPoolId.slice(0, 8)}...  source=nurse (to.require_auth)`,
+    );
+    const nurse = Keypair.fromSecret(config.nurseSecret);
+    const account = await sorobanRpc.getAccount(nurse.publicKey());
+    const contract = new Contract(config.privacyPoolId);
+
+    const op = contract.call(
+        'withdraw',
+        new Address(nurse.publicKey()).toScVal(),
+        nativeToScVal(Buffer.from(proofBytes), { type: 'bytes' }),
+        nativeToScVal(Buffer.from(publicBytes), { type: 'bytes' }),
+    );
+
+    const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: NETWORK_PASSPHRASE,
+    })
+        .addOperation(op)
+        .setTimeout(60)
+        .build();
+
+    progress.step('Simulating + assembling Soroban auth');
+    const prepared = await sorobanRpc.prepareTransaction(tx);
+    prepared.sign(nurse);
+
+    progress.step('Broadcasting transaction');
+    const send = await sorobanRpc.sendTransaction(prepared);
+    if (send.status === 'ERROR') {
+        throw new Error(`sendTransaction error: ${JSON.stringify(send.errorResult)}`);
     }
-    const hash = hashMatch[1];
 
-    // Confirm + read ledger via Horizon
-    const tx = await horizon.transactions().transaction(hash).call();
-    if (!tx.successful) throw new Error(`tx ${hash} not successful`);
+    // Poll until included
+    let result = await sorobanRpc.getTransaction(send.hash);
+    const deadline = Date.now() + 30_000;
+    while (result.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
+        if (Date.now() > deadline) throw new Error('tx not confirmed within 30s');
+        await new Promise((r) => setTimeout(r, 1500));
+        result = await sorobanRpc.getTransaction(send.hash);
+    }
 
-    // Mark coin spent so the next /a2a request fails fast with a clear message
-    writeFileSync(spentFlagPath(), hash);
+    if (result.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+        throw new Error(`tx failed: ${result.status}`);
+    }
 
-    return { hash, ledger: tx.ledger_attr };
+    // The withdraw() contract returns Vec<String>: empty = success, non-empty = error msg
+    const returned = scValToNative(result.returnValue as xdr.ScVal) as string[] | undefined;
+    if (Array.isArray(returned) && returned.length > 0) {
+        throw new Error(`pool rejected withdraw: ${returned.join(', ')}`);
+    }
+
+    return { hash: send.hash, ledger: result.ledger };
 }
 
-/** Confirms a withdraw tx on Horizon: successful, recipient is nurse. */
+// ---------- Settlement verification ----------
+
+/**
+ * Confirms a settlement tx on Horizon: must be successful and signed by the
+ * nurse account (since nurse-as-source is what to.require_auth() pins).
+ */
 export async function verifyPayment(
     hash: string,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
     try {
         const tx = await horizon.transactions().transaction(hash).call();
         if (!tx.successful) return { ok: false, reason: 'tx not successful' };
-        // The pool's withdraw emits a token transfer to the nurse; we verify by
-        // walking ops and looking for an invoke_host_function whose source is
-        // the nurse account, since the contract-internal transfer isn't a
-        // top-level Horizon "payment" op.
         if (tx.source_account !== config.nursePublic) {
             return {
                 ok: false,
-                reason: `tx source is ${tx.source_account}, expected nurse ${config.nursePublic}`,
+                reason: `tx source ${tx.source_account} != expected nurse ${config.nursePublic}`,
             };
         }
         return { ok: true };
