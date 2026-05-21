@@ -10,18 +10,32 @@ let handle = null;
 
 function patchWorkerUrls() {
     if (typeof window === 'undefined') return;
-    const Original = window.Worker;
-    if (Original.__sppPatched) return;
-    function Patched(url, opts) {
-        let resolved = url;
-        if (typeof resolved === 'string' && resolved.startsWith('./js/')) {
-            resolved = '/spp' + resolved.slice(1); // "./js/x.js" → "/spp/js/x.js"
-        }
-        return new Original(resolved, opts);
+    if (window.Blob.__sppPatched) return;
+
+    // gloo-worker spawns workers from a bootstrap Blob that contains
+    // `import * as bindgen from './js/storage-worker.js'`-style source. Worker
+    // base URL = the blob URL (origin only), so those relative paths resolve to
+    // /js/... at the site root (404). Rewrite the bootstrap source so the
+    // imports point at /spp/js/ instead.
+    const OrigBlob = window.Blob;
+    function PatchedBlob(parts, opts) {
+        const rewritten = (parts || []).map((p) => {
+            if (typeof p !== 'string') return p;
+            // gloo-worker resolves the relative path to an absolute URL against
+            // the document base BEFORE building the bootstrap blob, so the
+            // string we see here is like
+            //   `import init from 'http://host/js/storage-worker.js'; await init();`
+            // Rewrite "/js/<worker>.js" → "/spp/js/<worker>.js" wherever it appears.
+            return p.replace(
+                /\/js\/(storage-worker|prover-worker)\.js/g,
+                '/spp/js/$1.js',
+            );
+        });
+        return new OrigBlob(rewritten, opts);
     }
-    Patched.prototype = Original.prototype;
-    Patched.__sppPatched = true;
-    window.Worker = Patched;
+    PatchedBlob.prototype = OrigBlob.prototype;
+    PatchedBlob.__sppPatched = true;
+    window.Blob = PatchedBlob;
 }
 
 export async function initializeWasm(rpcUrl) {
