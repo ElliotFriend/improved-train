@@ -18,8 +18,7 @@ export const config = {
     aspNonMembershipId: A2A_ASP_NON_MEMBERSHIP_ID,
 };
 
-const NETWORK_PASSPHRASE =
-    config.network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
+const NETWORK_PASSPHRASE = config.network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
 
 const sorobanRpc = new rpc.Server(
     config.network === 'testnet'
