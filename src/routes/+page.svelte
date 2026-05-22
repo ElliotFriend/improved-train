@@ -30,6 +30,8 @@
         pool: string;
         aspMembership: string;
         aspNonMembership: string;
+        nurseNotePubkey: string;
+        nurseEncPubkey: string;
         description: string;
     }
 
@@ -185,8 +187,9 @@
             return;
         }
         const notes = await client.getUserNotes(address, 50);
-        noteCount = notes?.length ?? 0;
-        balanceStroops = (notes ?? []).reduce((acc, n) => acc + BigInt(n.amount), 0n);
+        const unspent = (notes ?? []).filter((n) => !n.spent);
+        noteCount = unspent.length;
+        balanceStroops = unspent.reduce((acc, n) => acc + BigInt(n.amount), 0n);
         phase = 'ready';
     }
 
@@ -374,12 +377,18 @@
                 throw new Error(`expected 402, got ${initial.status}`);
             }
             const { challenge }: { challenge: Challenge } = await initial.json();
+            if (!challenge.nurseNotePubkey || !challenge.nurseEncPubkey) {
+                throw new Error(
+                    'Challenge missing nurse pubkeys — run /setup-nurse and update env vars.',
+                );
+            }
             const amountXlm = (Number(challenge.amountStroops) / 1e7).toFixed(4);
             pushStep({
                 kind: 'challenge',
                 label: `402 Payment Required (${challenge.scheme})`,
                 detail:
-                    `${amountXlm} XLM to ${challenge.recipient.slice(0, 6)}…${challenge.recipient.slice(-4)} ` +
+                    `${amountXlm} XLM (in-pool transfer) to nurse ` +
+                    `${challenge.nurseNotePubkey.slice(0, 10)}…${challenge.nurseNotePubkey.slice(-4)} ` +
                     `via pool ${challenge.pool.slice(0, 6)}…${challenge.pool.slice(-4)}`,
                 link: {
                     href: `https://stellar.expert/explorer/testnet/contract/${challenge.pool}`,
@@ -393,6 +402,7 @@
             const picked: { id: string; amount: string }[] = [];
             let sum = 0n;
             for (const n of notes ?? []) {
+                if (n.spent) continue;
                 if (sum >= need) break;
                 if (picked.length >= 2) break;
                 picked.push(n);
@@ -400,13 +410,16 @@
             }
             if (sum < need) {
                 throw new Error(
-                    `Insufficient notes: have ${sum} stroops, need ${need}. Deposit some XLM first.`,
+                    `Insufficient unspent notes: have ${sum} stroops, need ${need}. Deposit more XLM.`,
                 );
             }
+            const change = sum - need;
             pushStep({
                 kind: 'protocol',
                 label: 'Selected input notes',
-                detail: `${picked.length} note(s), ${(Number(sum) / 1e7).toFixed(4)} XLM (need ${amountXlm})`,
+                detail:
+                    `${picked.length} note(s), ${(Number(sum) / 1e7).toFixed(4)} XLM ` +
+                    `(${amountXlm} → nurse, ${(Number(change) / 1e7).toFixed(4)} → change)`,
                 pending: true,
             });
 
@@ -416,16 +429,28 @@
                 detail: 'Building witness & proof in browser (~10s)…',
                 pending: true,
             });
-            const proved = await client.proveWithdraw(
+            // In-pool transfer: ext_amount = 0 so no XLM leaves the pool.
+            // Output 0 → nurse (challenge amount); output 1 → patient (change).
+            const patientKeys = await client.getUserKeys(address);
+            if (!patientKeys?.noteKeypair?.public || !patientKeys?.encryptionKeypair?.public) {
+                throw new Error('patient privacy keys missing — derive them first');
+            }
+            const patientNotePub = normalizePubkeyHex(patientKeys.noteKeypair.public);
+            const patientEncPub = normalizePubkeyHex(patientKeys.encryptionKeypair.public);
+            const proved = await client.proveTransact(
                 address,
                 BigInt(membershipBlinding.trim() || '0'),
                 challenge.recipient,
+                0n,
                 picked.map((n) => n.id),
+                [need, change],
+                [challenge.nurseNotePubkey, patientNotePub],
+                [challenge.nurseEncPubkey, patientEncPub],
                 handleProveStatus,
             );
             if (proved == null) {
                 throw new Error(
-                    'proveWithdraw returned null (ASP registration or membership-blinding mismatch?)',
+                    'proveTransact returned null (ASP registration or membership-blinding mismatch?)',
                 );
             }
 
@@ -563,6 +588,12 @@
         />
 
         <AskNurseCard bind:question {busy} asking={phase === 'asking'} onAsk={askNurse} />
+
+        <div class="rounded-md border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600">
+            Each consult is an in-pool transfer (Groth16 proof + nullifier/commitment events); no
+            XLM leaves the pool. The nurse's balance lives in encrypted notes only she can read —
+            open this page in a second window with the nurse's Freighter wallet to watch her side.
+        </div>
 
         <FlowSteps steps={flowSteps} />
 

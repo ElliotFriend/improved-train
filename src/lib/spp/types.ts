@@ -10,6 +10,9 @@ export interface ContractConfig {
 export interface UserNote {
     id: string;
     amount: string;
+    leafIndex: number;
+    createdAtLedger: number;
+    spent: boolean;
 }
 
 export interface UserKeys {
@@ -57,6 +60,17 @@ export interface WebClient {
         membershipBlinding: bigint,
         recipient: string,
         inputNoteIds: string[],
+        onStatus?: ProveStatusCallback,
+    ): Promise<Proved | null>;
+    proveTransact(
+        address: string,
+        membershipBlinding: bigint,
+        extRecipient: string,
+        extAmountStroops: bigint,
+        inputNoteIds: string[],
+        outputAmounts: bigint[],
+        outRecipientNoteKeysHex: string[],
+        outRecipientEncKeysHex: string[],
         onStatus?: ProveStatusCallback,
     ): Promise<Proved | null>;
 }

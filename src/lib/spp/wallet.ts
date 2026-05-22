@@ -241,10 +241,9 @@ export async function deriveKeysFromWallet(
         });
     } catch (e) {
         if (e instanceof WalletError && e.code === 'USER_REJECTED') {
-            throw new Error(
-                'Please approve the message signature to derive your spending key',
-                { cause: e },
-            );
+            throw new Error('Please approve the message signature to derive your spending key', {
+                cause: e,
+            });
         }
         throw e;
     }
@@ -262,10 +261,9 @@ export async function deriveKeysFromWallet(
         });
     } catch (e) {
         if (e instanceof WalletError && e.code === 'USER_REJECTED') {
-            throw new Error(
-                'Please approve the message signature to derive your encryption key',
-                { cause: e },
-            );
+            throw new Error('Please approve the message signature to derive your encryption key', {
+                cause: e,
+            });
         }
         throw e;
     }

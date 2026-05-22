@@ -38,6 +38,8 @@ export const POST: RequestHandler = async ({ request }) => {
                     pool: config.poolContractId,
                     aspMembership: config.aspMembershipId,
                     aspNonMembership: config.aspNonMembershipId,
+                    nurseNotePubkey: config.nurseNotePubkey,
+                    nurseEncPubkey: config.nurseEncPubkey,
                     description: 'Private consultation with nurse agent',
                 },
             },

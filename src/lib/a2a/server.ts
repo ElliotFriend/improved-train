@@ -7,6 +7,8 @@ import {
     A2A_POOL_CONTRACT_ID,
     A2A_ASP_MEMBERSHIP_ID,
     A2A_ASP_NON_MEMBERSHIP_ID,
+    A2A_NURSE_NOTE_PUBKEY,
+    A2A_NURSE_ENC_PUBKEY,
 } from '$env/static/private';
 
 export const config = {
@@ -16,6 +18,8 @@ export const config = {
     poolContractId: A2A_POOL_CONTRACT_ID,
     aspMembershipId: A2A_ASP_MEMBERSHIP_ID,
     aspNonMembershipId: A2A_ASP_NON_MEMBERSHIP_ID,
+    nurseNotePubkey: A2A_NURSE_NOTE_PUBKEY,
+    nurseEncPubkey: A2A_NURSE_ENC_PUBKEY,
 };
 
 const NETWORK_PASSPHRASE = config.network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
