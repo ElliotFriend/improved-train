@@ -3,4 +3,5 @@ onlyBuiltDependencies:
     - '@tailwindcss/oxide'
 packages:
     - mcp-server
+    - prover-sidecar
 minimumReleaseAge: 4320

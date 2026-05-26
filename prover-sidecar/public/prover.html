@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <title>spp prover sidecar</title>
+    </head>
+    <body>
+        <script type="module">
+            // Mirror src/lib/spp/wasm-facade.ts: the web platform crate spawns
+            // workers with hardcoded "/js/<worker>.js" URLs (gloo-worker resolves
+            // them against a bootstrap Blob). Rewrite them to "/spp/js/<worker>.js".
+            (function patchWorkerUrls() {
+                const OrigBlob = window.Blob;
+                if (OrigBlob.__sppPatched) return;
+                const PatchedBlob = function (parts, opts) {
+                    const rewritten = (parts ?? []).map((p) =>
+                        typeof p === 'string'
+                            ? p.replace(
+                                  /\/js\/(storage-worker|prover-worker)\.js/g,
+                                  '/spp/js/$1.js',
+                              )
+                            : p,
+                    );
+                    return new OrigBlob(rewritten, opts);
+                };
+                PatchedBlob.prototype = OrigBlob.prototype;
+                PatchedBlob.__sppPatched = true;
+                window.Blob = PatchedBlob;
+            })();
+
+            let handle = null;
+
+            async function init(rpcUrl) {
+                if (handle) return { ok: true, already: true };
+                const spp = await import('/spp/js/web.js');
+                await spp.default('/spp/js/web_bg.wasm');
+                const config = new spp.Config(rpcUrl);
+                handle = await spp.mainThread(config);
+                return { ok: true };
+            }
+
+            window.__sppInit = init;
+            window.__sppContractConfig = async () => {
+                if (!handle) throw new Error('not initialized');
+                return handle.webClient.contractConfig();
+            };
+            window.__sppReady = true;
+        </script>
+    </body>
+</html>
