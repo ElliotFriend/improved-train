@@ -56,7 +56,7 @@ export const POST: RequestHandler = async ({ request }) => {
         return json({
             advice:
                 '_(Nurse agent is unconfigured -- set `ANTHROPIC_API_KEY` in `.env` to generate a real reply.)_\n\n' +
-                `Settlement verified on RPC: \`${paymentTx}\` (pool transact targeting ${config.poolContractId.slice(0, 10)}...).`,
+                `Settlement verified on RPC: \`${paymentTx}\` (pool transact targeting ${config.poolContractId.slice(0, 10)}…, broadcaster ${verdict.sender.slice(0, 6)}…, ${verdict.ageSeconds}s old).`,
             paymentTx,
         });
     }
