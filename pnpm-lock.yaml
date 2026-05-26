@@ -20,6 +20,9 @@ importers:
       '@stellar/stellar-sdk':
         specifier: 14.6.1
         version: 14.6.1
+      tweetnacl:
+        specifier: ^1.0.3
+        version: 1.0.3
     devDependencies:
       '@eslint/compat':
         specifier: ^2.0.3
@@ -1846,6 +1849,9 @@ packages:
     peerDependencies:
       typescript: '>=4.8.4'
 
+  tweetnacl@1.0.3:
+    resolution: {integrity: sha512-6rt+RN7aOi1nGMyC4Xa5DdYiukl2UWCbcJft7YhxReBGQD7OAM8Pbxw6YMo4r2diNEA8FEmu32YOn9rhaiE5yw==}
+
   type-check@0.4.0:
     resolution: {integrity: sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew==}
     engines: {node: '>= 0.8.0'}
@@ -3471,6 +3477,8 @@ snapshots:
   ts-api-utils@2.5.0(typescript@5.9.3):
     dependencies:
       typescript: 5.9.3
+
+  tweetnacl@1.0.3: {}
 
   type-check@0.4.0:
     dependencies:

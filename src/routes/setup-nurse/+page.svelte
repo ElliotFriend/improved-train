@@ -15,6 +15,7 @@
     let nurseAddress = $state('');
     let notePub = $state('');
     let encPub = $state('');
+    let encPriv = $state('');
     let aspLeafHex = $state('');
     let aspInsertHash = $state<string | null>(null);
 
@@ -90,11 +91,19 @@
                 new Uint8Array(encryptionSig),
             );
             const keys = await client.getUserKeys(nurseAddress);
-            if (!keys?.noteKeypair?.public || !keys?.encryptionKeypair?.public) {
+            if (
+                !keys?.noteKeypair?.public ||
+                !keys?.encryptionKeypair?.public ||
+                !keys?.encryptionKeypair?.private
+            ) {
                 throw new Error('Failed to read freshly-derived keys');
             }
             notePub = normalizePubkeyHex(keys.noteKeypair.public);
             encPub = normalizePubkeyHex(keys.encryptionKeypair.public);
+            // X25519 encryption privkey — needed by the nurse server to decrypt
+            // incoming output notes and verify the paid amount. The note
+            // (spending) privkey stays browser-only.
+            encPriv = normalizePubkeyHex(keys.encryptionKeypair.private);
 
             statusMsg = 'Computing ASP membership leaf…';
             const blindingBi = BigInt(blinding.trim() || '0');
@@ -153,10 +162,11 @@
     }
 
     const envBlock = $derived(
-        nurseAddress && notePub && encPub
+        nurseAddress && notePub && encPub && encPriv
             ? `A2A_NURSE_PUBLIC="${nurseAddress}"\n` +
                   `A2A_NURSE_NOTE_PUBKEY="${notePub}"\n` +
-                  `A2A_NURSE_ENC_PUBKEY="${encPub}"\n`
+                  `A2A_NURSE_ENC_PUBKEY="${encPub}"\n` +
+                  `A2A_NURSE_ENC_PRIVKEY="${encPriv}"\n`
             : '',
     );
 </script>
@@ -226,6 +236,11 @@
                 Done. Paste this into your <code>.env</code>:
             </h2>
             <pre class="overflow-x-auto rounded bg-white p-3 text-xs">{envBlock}</pre>
+            <div class="mt-2 text-xs text-amber-700">
+                <strong>A2A_NURSE_ENC_PRIVKEY is sensitive.</strong> Anyone with it can read every output
+                note encrypted to the nurse (amounts, blindings) — but cannot spend them (that requires
+                the BN254 spending key, which stays in this browser's OPFS).
+            </div>
             {#if aspInsertHash}
                 <div class="mt-2 text-xs text-gray-600">
                     ASP insert tx:
