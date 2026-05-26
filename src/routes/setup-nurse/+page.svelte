@@ -73,12 +73,15 @@
             const keypair = sdk.Keypair.fromSecret(secret.trim());
             nurseAddress = keypair.publicKey();
 
+            const encoder = new TextEncoder();
+            // stellar-sdk's typings say Buffer, but the runtime accepts any
+            // Uint8Array (noble-ed25519 internally). Cast to satisfy TS in the
+            // browser where Node's Buffer global isn't defined.
+            const toBuf = (s: string) => encoder.encode(s) as unknown as Buffer;
             statusMsg = 'Signing spending-key message…';
-            const spendingSig = keypair.sign(Buffer.from(client.spendingKeyMessage(), 'utf8'));
+            const spendingSig = keypair.sign(toBuf(client.spendingKeyMessage()));
             statusMsg = 'Signing encryption-key message…';
-            const encryptionSig = keypair.sign(
-                Buffer.from(client.encryptionDerivationMessage(), 'utf8'),
-            );
+            const encryptionSig = keypair.sign(toBuf(client.encryptionDerivationMessage()));
 
             statusMsg = 'Deriving privacy keys…';
             await client.deriveAndSaveUserKeys(

@@ -193,6 +193,26 @@
         phase = 'ready';
     }
 
+    /**
+     * Re-poll the local note storage until it differs from the captured
+     * snapshot, or the timeout elapses. Used after pool `transact` ops
+     * (deposit / consult) so the displayed balance reflects the new state once
+     * the storage-worker indexer catches up, instead of relying on a fixed
+     * sleep.
+     */
+    async function waitForUserNotesChange(timeoutMs = 30_000, intervalMs = 1500): Promise<void> {
+        if (!client || !address) return;
+        const snapshot = (notes: { id: string; spent: boolean }[] | null): string =>
+            JSON.stringify((notes ?? []).map((n) => `${n.id}:${n.spent}`).sort());
+        const initial = snapshot(await client.getUserNotes(address, 50));
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, intervalMs));
+            const current = snapshot(await client.getUserNotes(address, 50));
+            if (current !== initial) return;
+        }
+    }
+
     function xlmToStroops(s: string): bigint {
         const n = Number(s);
         if (!Number.isFinite(n) || n <= 0) throw new Error('amount must be a positive number');
@@ -318,7 +338,7 @@
             );
             lastDepositHash = hash;
             statusMsg = `Deposit submitted (${hash.slice(0, 12)}…). Waiting for indexer to pick up the new notes…`;
-            await new Promise((r) => setTimeout(r, 2500));
+            await waitForUserNotesChange();
             await refreshState();
         } catch (err) {
             errorMsg = err instanceof Error ? err.message : String(err);
@@ -437,10 +457,15 @@
             }
             const patientNotePub = normalizePubkeyHex(patientKeys.noteKeypair.public);
             const patientEncPub = normalizePubkeyHex(patientKeys.encryptionKeypair.public);
+            // ext_recipient = pool contract itself. The contract only reads
+            // recipient when ext_amount < 0 (withdraw); for ext_amount = 0 it
+            // only enters the ext_data_hash. Mirroring the upstream deposit
+            // flow's "use pool_address as placeholder" pattern keeps every
+            // non-withdraw transact indistinguishable to an outside observer.
             const proved = await client.proveTransact(
                 address,
                 BigInt(membershipBlinding.trim() || '0'),
-                challenge.recipient,
+                challenge.pool,
                 0n,
                 picked.map((n) => n.id),
                 [need, change],
@@ -500,7 +525,7 @@
             phase = 'replied';
             // Refresh notes / balance — the transact burned an input note and
             // produced new output commitments the indexer needs to surface.
-            await new Promise((r) => setTimeout(r, 1500));
+            await waitForUserNotesChange();
             await refreshState();
         } catch (err) {
             errorMsg = err instanceof Error ? err.message : String(err);
