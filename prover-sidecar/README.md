@@ -27,6 +27,11 @@ MCP server ──POST /prove {challenge}──▶ prover-sidecar (:7878)
 The page proves; Node signs + submits. The patient secret never enters the
 browser context.
 
+> **You usually don't run this directly.** The [MCP server](../mcp-server)
+> supervises this sidecar — it spawns it, waits for `/health`, and runs the
+> bootstrap automatically on the first consult. The manual steps below are for
+> standalone use / debugging, or if you set `PROVER_SIDECAR_AUTOSTART=0`.
+
 ## Prereqs
 
 ```bash
@@ -72,6 +77,7 @@ curl localhost:7878/health
 | `PROVER_SIDECAR_PORT`     | No       | `7878`                             | Port for the `/prove` + `/health` server       |
 | `PATIENT_DEPOSIT_XLM`     | No       | `50`                               | (bootstrap only) deposit amount                |
 | `SPP_STATIC_DIR`          | No       | `../static/spp`                    | Override the served WASM bundle dir            |
+| `PROVER_USER_DATA_DIR`    | No       | `./.prover-profile`                | Persistent Chromium profile (OPFS note index)  |
 
 ## Endpoints
 
@@ -82,9 +88,10 @@ curl localhost:7878/health
 
 ## Known rough edges (demo-grade)
 
-- **Cold start:** OPFS is not persisted across restarts, so on each boot the
-  indexer re-syncs the chain before `/health` shows notes (tens of seconds).
-  Persisting a Playwright `userDataDir` would fix this.
+- **Cold start:** the first-ever boot re-syncs the chain before `/health` shows
+  notes (tens of seconds). After that it's fast — the headless browser now runs
+  in a persistent context (`userDataDir`, default `./.prover-profile`, override
+  with `PROVER_USER_DATA_DIR`), so OPFS and the note index survive restarts.
 - **Single-writer:** `/prove` calls are serialized (the storage worker is
   single-tab). Concurrent consults queue.
 - **Network:** the prover worker fetches circuit artifacts from

@@ -3,9 +3,11 @@
  * functions. The page (public/prover.html) is the WASM access layer; this
  * module drives it from Node.
  */
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type BrowserContext, type Page } from 'playwright';
 import { startStaticServer } from './server.js';
 import type { Server } from 'node:http';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface MarshalledProof {
     [k: string]: unknown;
@@ -41,9 +43,21 @@ export function unmarshal(value: unknown): unknown {
     return out;
 }
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Where the headless browser persists OPFS/IndexedDB (the privacy-pool note
+ * index). Persisting it across runs means notes survive restarts and the cold
+ * boot doesn't have to re-sync the whole chain. Override with
+ * PROVER_USER_DATA_DIR; defaults to ../.prover-profile (gitignored).
+ */
+function userDataDir(): string {
+    return process.env.PROVER_USER_DATA_DIR ?? resolve(HERE, '..', '.prover-profile');
+}
+
 export class ProverBrowser {
     private server: Server | null = null;
-    private browser: Browser | null = null;
+    private context: BrowserContext | null = null;
     private page: Page | null = null;
     private initialized = false;
 
@@ -54,9 +68,12 @@ export class ProverBrowser {
         this.server = server;
         const origin = `http://127.0.0.1:${port}`;
 
-        this.browser = await chromium.launch({ headless: true, args: ['--headless=new'] });
-        const context = await this.browser.newContext();
-        this.page = await context.newPage();
+        // Persistent context (not launch()+newContext()) so OPFS survives restarts.
+        this.context = await chromium.launchPersistentContext(userDataDir(), {
+            headless: true,
+            args: ['--headless=new'],
+        });
+        this.page = this.context.pages()[0] ?? (await this.context.newPage());
         this.page.on('console', (msg) => {
             const t = msg.text();
             // Surface prover progress + errors; mute the verbose %c-styled logs.
@@ -109,7 +126,11 @@ export class ProverBrowser {
         });
     }
 
-    async deriveKeys(address: string, spendingSigB64: string, encryptionSigB64: string): Promise<void> {
+    async deriveKeys(
+        address: string,
+        spendingSigB64: string,
+        encryptionSigB64: string,
+    ): Promise<void> {
         await this.p().evaluate(
             async ([address, s, e]) => {
                 const w = window as unknown as {
@@ -178,7 +199,12 @@ export class ProverBrowser {
                     outputs as string[],
                 );
             },
-            [address, blinding.toString(), amountStroops.toString(), outputs.map((o) => o.toString())] as const,
+            [
+                address,
+                blinding.toString(),
+                amountStroops.toString(),
+                outputs.map((o) => o.toString()),
+            ] as const,
         );
         return raw == null ? null : (unmarshal(raw) as MarshalledProof);
     }
@@ -233,9 +259,9 @@ export class ProverBrowser {
     }
 
     async stop(): Promise<void> {
-        if (this.browser) await this.browser.close();
+        if (this.context) await this.context.close();
         if (this.server) this.server.close();
-        this.browser = null;
+        this.context = null;
         this.page = null;
         this.server = null;
         this.initialized = false;

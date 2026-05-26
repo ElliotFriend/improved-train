@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { askNurse, fetchChallenge, type PatientConfig } from './consult-client.js';
+import { ensureSidecar } from './sidecar.js';
 
 export interface ToolDefinition {
     name: string;
@@ -13,17 +14,17 @@ export const tools: ToolDefinition[] = [
         name: 'ask-nurse',
         description:
             'Ask the AI Nurse agent for general health guidance over a private channel. ' +
-            'Each consult is paid for via the privacy-pool payment flow (currently ' +
-            "blocked behind a prover-backend TODO — see the MCP server's README). " +
-            'Returns the nurse\'s reply as plain text.',
+            'Each consult is paid for via the privacy-pool payment flow. The prover ' +
+            'sidecar that settles the payment is started and funded automatically on the ' +
+            "first consult (no manual bootstrap/start needed). Returns the nurse's reply " +
+            'as plain text.',
         inputSchema: {
-            question: z
-                .string()
-                .min(1)
-                .describe('The health question to send to the nurse'),
+            question: z.string().min(1).describe('The health question to send to the nurse'),
         },
         handler: async (args, config) => {
             const question = args.question as string;
+            // Bring the prover sidecar up (and fund it) if it isn't already — memoized.
+            await ensureSidecar();
             const advice = await askNurse(config, question);
             return { advice };
         },
@@ -31,7 +32,7 @@ export const tools: ToolDefinition[] = [
     {
         name: 'get-challenge',
         description:
-            'Fetch the AI Nurse\'s 402 payment challenge without paying. Useful for ' +
+            "Fetch the AI Nurse's 402 payment challenge without paying. Useful for " +
             'previewing the cost (amountStroops), the pool contract, ASP contracts, ' +
             'and the nurse pubkeys before deciding to consult.',
         inputSchema: undefined,

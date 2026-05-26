@@ -130,8 +130,10 @@ async function settleChallenge(
     } catch (err) {
         throw new Error(
             `prover sidecar unreachable at ${config.sidecarUrl} ` +
-                `(${err instanceof Error ? err.message : err}). Is it running? ` +
-                'Start it with `pnpm --filter mpp-demo-prover-sidecar start`.',
+                `(${err instanceof Error ? err.message : err}). It should be auto-started by ` +
+                'the MCP server; if you disabled that (PROVER_SIDECAR_AUTOSTART=0), start it ' +
+                'with `pnpm --filter mpp-demo-prover-sidecar start`.',
+            { cause: err },
         );
     }
     if (!res.ok) {

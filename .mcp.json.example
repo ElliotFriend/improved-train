@@ -10,7 +10,9 @@
             "args": ["./mcp-server/build/index.js"],
             "env": {
                 "MPP_DEMO_BASE_URL": "http://localhost:5173",
-                "PROVER_SIDECAR_URL": "http://127.0.0.1:7878"
+                "PROVER_SIDECAR_URL": "http://127.0.0.1:7878",
+                "PATIENT_STELLAR_SECRET": "S...your-patient-testnet-secret...",
+                "PATIENT_ASP_BLINDING": "0"
             }
         }
     }
