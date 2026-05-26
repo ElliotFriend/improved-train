@@ -8,8 +8,8 @@
             href={resolve('/')}
             class="text-lg font-semibold tracking-tight text-gray-900 no-underline"
         >
-            A2A Payments
+            AI Nurse Payments
         </a>
-        <span class="text-sm text-gray-400">Machine Payments Protocol on Stellar testnet</span>
+        <span class="text-sm text-gray-400">Agent-to-Agent MPP on Stellar Testnet</span>
     </nav>
 </header>

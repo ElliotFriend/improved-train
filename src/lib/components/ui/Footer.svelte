@@ -16,7 +16,7 @@
         <div>
             <a
                 class="font-medium text-gray-500 no-underline transition-colors hover:text-gray-900"
-                href="https://github.com/ElliotFriend/stellar-mpp-demo"
+                href="https://github.com/ElliotFriend/improved-train"
                 target="_blank"
                 rel="external noopener noreferrer">Source Code</a
             >
