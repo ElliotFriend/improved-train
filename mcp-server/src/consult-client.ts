@@ -5,18 +5,17 @@
  * but adapted for the AI Nurse's privacy-pool challenge instead of x402.
  *
  *   1. POST /api/a2a/consult { question }  → 402 with `challenge` JSON
- *   2. settle the challenge by submitting a pool `transact()` tx, get hash
+ *   2. settle the challenge via the prover sidecar (POST /prove), get hash
  *   3. POST /api/a2a/consult { question } with `x-payment-tx: <hash>`
  *      header → 200 with { advice }
+ *
+ * The patient's Stellar secret + the privacy-pool prover live in the sidecar
+ * (see ../../prover-sidecar). This client only orchestrates HTTP.
  */
-import { Keypair, Networks } from '@stellar/stellar-sdk';
 
 export interface PatientConfig {
-    secretKey: string;
     baseUrl: string;
-    network: 'testnet' | 'pubnet';
-    rpcUrl: string;
-    networkPassphrase: string;
+    sidecarUrl: string;
 }
 
 export interface NurseChallenge {
@@ -44,27 +43,9 @@ interface AdviceResponse {
 }
 
 export function buildPatientConfig(env: NodeJS.ProcessEnv): PatientConfig {
-    const secretKey = env.PATIENT_STELLAR_SECRET;
-    if (!secretKey) throw new Error('PATIENT_STELLAR_SECRET is required');
-    try {
-        Keypair.fromSecret(secretKey);
-    } catch {
-        throw new Error('PATIENT_STELLAR_SECRET is not a valid Stellar secret (S…)');
-    }
-
     const baseUrl = (env.MPP_DEMO_BASE_URL ?? 'http://localhost:5173').replace(/\/$/, '');
-    const network = (env.STELLAR_NETWORK ?? 'testnet') as 'testnet' | 'pubnet';
-    if (network !== 'testnet' && network !== 'pubnet') {
-        throw new Error(`STELLAR_NETWORK must be testnet or pubnet, got ${network}`);
-    }
-    const defaultRpc =
-        network === 'testnet'
-            ? 'https://soroban-testnet.stellar.org'
-            : 'https://soroban.stellar.org';
-    const rpcUrl = env.STELLAR_RPC_URL ?? defaultRpc;
-    const networkPassphrase = network === 'testnet' ? Networks.TESTNET : Networks.PUBLIC;
-
-    return { secretKey, baseUrl, network, rpcUrl, networkPassphrase };
+    const sidecarUrl = (env.PROVER_SIDECAR_URL ?? 'http://127.0.0.1:7878').replace(/\/$/, '');
+    return { baseUrl, sidecarUrl };
 }
 
 /**
@@ -130,37 +111,35 @@ export async function askNurse(config: PatientConfig, question: string): Promise
 }
 
 /**
- * Settle the nurse's payment challenge by submitting a privacy-pool
- * `proveTransact` tx and returning the resulting tx hash.
- *
- * TODO: this is the proving step that needs a prover backend. Options:
- *
- *   1. Node-targeted WASM build of the upstream Nethermind prover (durable).
- *      Sibling crate to `stellar-private-payments/app/crates/platforms/web`,
- *      swap gloo-worker → worker_threads, OPFS → better-sqlite3.
- *
- *   2. Headless-Chrome sidecar: a small SvelteKit/Express service that hosts
- *      the existing browser WASM and exposes POST /prove → { paymentTxHash }.
- *      Spin it up alongside this MCP. Patient secret stays here; the sidecar
- *      only needs the proving keys + the nurse pubkeys from the challenge.
- *
- *   3. Cheat: pre-fund pool notes out of band and submit non-private XLM
- *      payments here. Loses the privacy property the demo is built around;
- *      only useful as a last-resort fallback for showing the agent-loop.
- *
- * For now this throws so the agent surface fails loudly and the calling LLM
- * can report the gap accurately.
+ * Settle the nurse's payment challenge by delegating to the prover sidecar
+ * (headless-Chromium-hosted privacy-pool prover; see ../../prover-sidecar).
+ * The sidecar picks the patient's notes, proves the in-pool transfer, submits
+ * it with the patient's key, and returns the settlement tx hash.
  */
 async function settleChallenge(
-    _config: PatientConfig,
-    _challenge: NurseChallenge,
+    config: PatientConfig,
+    challenge: NurseChallenge,
 ): Promise<string> {
-    void _config;
-    void _challenge;
-    throw new Error(
-        'settleChallenge is not yet implemented: the privacy-pool proveTransact ' +
-            'prover is browser-only WASM. See README + JSDoc on settleChallenge for ' +
-            'the three backend options (Node-WASM port, headless-Chrome sidecar, ' +
-            'or non-private payment fallback).',
-    );
+    let res: Response;
+    try {
+        res = await fetch(`${config.sidecarUrl}/prove`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ challenge }),
+        });
+    } catch (err) {
+        throw new Error(
+            `prover sidecar unreachable at ${config.sidecarUrl} ` +
+                `(${err instanceof Error ? err.message : err}). Is it running? ` +
+                'Start it with `pnpm --filter mpp-demo-prover-sidecar start`.',
+        );
+    }
+    if (!res.ok) {
+        throw new Error(`prover sidecar /prove failed: ${res.status}: ${await res.text()}`);
+    }
+    const body = (await res.json()) as { txHash?: string; error?: string };
+    if (!body?.txHash) {
+        throw new Error(`prover sidecar returned no txHash: ${body?.error ?? 'unknown error'}`);
+    }
+    return body.txHash;
 }

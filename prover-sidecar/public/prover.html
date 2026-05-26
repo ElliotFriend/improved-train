@@ -28,7 +28,27 @@
                 window.Blob = PatchedBlob;
             })();
 
+            // Convert WASM proof output (nested Uint8Arrays / bigints) into a
+            // JSON-safe form for the Playwright evaluate boundary. Node revives
+            // {__bytes:[...]} → Uint8Array and {__bigint:"…"} → BigInt.
+            function marshal(obj) {
+                if (obj instanceof Uint8Array) return { __bytes: Array.from(obj) };
+                if (obj instanceof ArrayBuffer) return { __bytes: Array.from(new Uint8Array(obj)) };
+                if (typeof obj === 'bigint') return { __bigint: obj.toString() };
+                if (Array.isArray(obj)) return obj.map(marshal);
+                if (obj && typeof obj === 'object') {
+                    const out = {};
+                    for (const k of Object.keys(obj)) out[k] = marshal(obj[k]);
+                    return out;
+                }
+                return obj;
+            }
+
             let handle = null;
+            function client() {
+                if (!handle) throw new Error('WASM not initialized');
+                return handle.webClient;
+            }
 
             async function init(rpcUrl) {
                 if (handle) return { ok: true, already: true };
@@ -40,10 +60,67 @@
             }
 
             window.__sppInit = init;
-            window.__sppContractConfig = async () => {
-                if (!handle) throw new Error('not initialized');
-                return handle.webClient.contractConfig();
+            window.__sppContractConfig = async () => client().contractConfig();
+
+            window.__sppKeyMessages = async () => ({
+                spending: client().spendingKeyMessage(),
+                encryption: client().encryptionDerivationMessage(),
+            });
+
+            // spendingSigB64 / encryptionSigB64 are base64-encoded raw ed25519
+            // signatures (Keypair.sign over the message bytes, computed in Node).
+            window.__sppDeriveKeys = async (address, spendingSigB64, encryptionSigB64) => {
+                const b64ToBytes = (b64) =>
+                    Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+                await client().deriveAndSaveUserKeys(
+                    address,
+                    b64ToBytes(spendingSigB64),
+                    b64ToBytes(encryptionSigB64),
+                );
+                return { ok: true };
             };
+
+            window.__sppGetUserKeys = async (address) => client().getUserKeys(address);
+            window.__sppGetUserNotes = async (address, limit) =>
+                client().getUserNotes(address, limit);
+            window.__sppDeriveAspLeaf = async (blindingStr, pubkeyHex) =>
+                client().deriveAspUserLeaf(BigInt(blindingStr), pubkeyHex);
+
+            window.__sppProveDeposit = async (address, blindingStr, amountStr, outputsStr) => {
+                const proved = await client().proveDeposit(
+                    address,
+                    BigInt(blindingStr),
+                    BigInt(amountStr),
+                    outputsStr.map((s) => BigInt(s)),
+                    (p) => console.log('[prove]', p?.message ?? ''),
+                );
+                return proved == null ? null : marshal(proved);
+            };
+
+            window.__sppProveTransact = async (
+                address,
+                blindingStr,
+                extRecipient,
+                extAmountStr,
+                inputNoteIds,
+                outputsStr,
+                outNoteKeysHex,
+                outEncKeysHex,
+            ) => {
+                const proved = await client().proveTransact(
+                    address,
+                    BigInt(blindingStr),
+                    extRecipient,
+                    BigInt(extAmountStr),
+                    inputNoteIds,
+                    outputsStr.map((s) => BigInt(s)),
+                    outNoteKeysHex,
+                    outEncKeysHex,
+                    (p) => console.log('[prove]', p?.message ?? ''),
+                );
+                return proved == null ? null : marshal(proved);
+            };
+
             window.__sppReady = true;
         </script>
     </body>

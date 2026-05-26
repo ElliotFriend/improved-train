@@ -9,9 +9,8 @@
             "command": "node",
             "args": ["./mcp-server/build/index.js"],
             "env": {
-                "PATIENT_STELLAR_SECRET": "S...",
                 "MPP_DEMO_BASE_URL": "http://localhost:5173",
-                "STELLAR_NETWORK": "testnet"
+                "PROVER_SIDECAR_URL": "http://127.0.0.1:7878"
             }
         }
     }

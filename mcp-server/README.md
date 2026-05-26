@@ -6,21 +6,23 @@ into Claude Code (or any MCP-capable host) over stdio.
 
 Pattern mirrored from
 [stellar-observatory's mcp-server](../../stellar-observatory/mcp-server) — the
-patient agent holds its own Stellar secret (no Freighter, no human clicks),
-sees the nurse's 402 challenge, signs and submits the settlement, and returns
-the advice to the calling LLM.
+patient agent sees the nurse's 402 challenge, settles it (no Freighter, no human
+clicks), and returns the advice to the calling LLM.
 
-## Status: prover-stubbed scaffold
+## Architecture
 
-The handshake + payment-header retry are wired; the **settlement step**
-(`proveTransact`) currently throws a `TODO` because the privacy-pool prover
-is browser-only WASM. Plug in one of:
+This MCP server is pure orchestration. It does **not** hold the patient's
+Stellar secret or do any proving — that lives in the
+[prover-sidecar](../prover-sidecar), which it calls over HTTP:
 
-- A future Node-targeted build of the Nethermind prover (durable)
-- A headless-Chrome sidecar exposing `/prove` (interim)
-- Pre-funded notes + a non-private payment fallback (cheat)
+```
+ask-nurse({question})
+  → POST nurse /api/a2a/consult           → 402 challenge
+  → POST prover-sidecar /prove {challenge} → { txHash }   (proves + signs + submits)
+  → POST nurse /api/a2a/consult + x-payment-tx → { advice }
+```
 
-See `src/consult-client.ts::settleChallenge` for the seam.
+Run the prover-sidecar first (it owns `PATIENT_STELLAR_SECRET`).
 
 ## Setup
 
@@ -42,9 +44,8 @@ Edit `.mcp.json` at the repo root (see `.mcp.json.example`):
             "command": "node",
             "args": ["./mcp-server/build/index.js"],
             "env": {
-                "PATIENT_STELLAR_SECRET": "S...",
                 "MPP_DEMO_BASE_URL": "http://localhost:5173",
-                "STELLAR_NETWORK": "testnet"
+                "PROVER_SIDECAR_URL": "http://127.0.0.1:7878"
             }
         }
     }
@@ -53,12 +54,12 @@ Edit `.mcp.json` at the repo root (see `.mcp.json.example`):
 
 ## Env vars
 
-| Variable                  | Required | Default                 | Description                                          |
-| ------------------------- | -------- | ----------------------- | ---------------------------------------------------- |
-| `PATIENT_STELLAR_SECRET`  | Yes      | —                       | Patient agent's Stellar secret (`S…`) for signing    |
-| `MPP_DEMO_BASE_URL`       | No       | `http://localhost:5173` | Base URL of the SvelteKit app exposing `/api/a2a/*`  |
-| `STELLAR_NETWORK`         | No       | `testnet`               | `testnet` or `pubnet`                                |
-| `STELLAR_RPC_URL`         | No       | derived                 | Override Soroban RPC URL                             |
+| Variable             | Required | Default                  | Description                                         |
+| -------------------- | -------- | ------------------------ | --------------------------------------------------- |
+| `MPP_DEMO_BASE_URL`  | No       | `http://localhost:5173`  | Base URL of the SvelteKit app exposing `/api/a2a/*` |
+| `PROVER_SIDECAR_URL` | No       | `http://127.0.0.1:7878`  | Prover sidecar that settles the payment             |
+
+The patient's Stellar secret lives in the **prover-sidecar**, not here.
 
 ## Tools
 
